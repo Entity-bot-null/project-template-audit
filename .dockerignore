@@ -1,17 +1,19 @@
 # The build context is the repository root (both Dockerfiles need the
-# workspace files). An allowlist: only the workspace manifests, the lockfile
-# and apps/ reach the builder, minus the files below. Anything else placed
-# under apps/ (a database dump, say) would still reach the build stage and its
-# cache: keep such files out of the repository tree. The final images get only
-# what their Dockerfiles copy.
+# workspace files). An allowlist: only the workspace manifests, the lockfile,
+# apps/ and the one package the API runs with (audit-contract) reach the
+# builder, minus the files below. Anything else placed under them (a database
+# dump, say) would still reach the build stage and its cache: keep such files
+# out of the repository tree. The final images get only what their
+# Dockerfiles copy.
 *
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !tsconfig.base.json
 !apps/
+!packages/audit-contract/
 
-# Inside apps/: host installs, build output, logs, and secrets in their usual
+# Inside them: host installs, build output, logs, and secrets in their usual
 # file forms stay out.
 **/node_modules
 **/dist
