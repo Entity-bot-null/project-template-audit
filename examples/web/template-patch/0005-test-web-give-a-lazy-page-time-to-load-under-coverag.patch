@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 17:13:33 -0600
+Subject: [PATCH 05/10] test(web): give a lazy page time to load under coverage
+
+findBy* and waitFor give up after Testing Library's default second. A
+lazy page's first import in a run, instrumented for coverage while
+`pnpm verify` runs the API's suite beside it, can take longer, so a spec
+of such a page failed now and then on a loaded machine. They now wait up
+to three seconds; a passing test is not slower.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/test/setup.ts | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/apps/web/src/test/setup.ts b/apps/web/src/test/setup.ts
+index 0d74b73..12cbb8e 100644
+--- a/apps/web/src/test/setup.ts
++++ b/apps/web/src/test/setup.ts
+@@ -1,7 +1,12 @@
+ import '@testing-library/jest-dom/vitest';
+-import { cleanup } from '@testing-library/react';
++import { cleanup, configure } from '@testing-library/react';
+ import { afterEach } from 'vitest';
+ 
++// A lazy page's first import in a run, under coverage instrumentation and
++// beside the API's suite (`pnpm verify` runs both at once), can take longer
++// than the default second that findBy* and waitFor wait for.
++configure({ asyncUtilTimeout: 3000 });
++
+ afterEach(() => {
+   cleanup();
+ });

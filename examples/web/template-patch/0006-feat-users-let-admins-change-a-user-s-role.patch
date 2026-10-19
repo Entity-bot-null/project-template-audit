@@ -1,0 +1,1147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 17:18:08 -0600
+Subject: [PATCH 06/10] feat(users): let admins change a user's role
+
+The template had roles but no way to change one short of an SQL update,
+which then applied only at the account's next refresh.
+
+PATCH /api/users/:id (admins only) changes the role and raises the
+account's securityVersion in the same transaction: its access tokens end
+at once and its next refresh carries the new role, its sessions go on.
+The last admin cannot stop being one (409); a demotion locks every
+admin's row in one order first, so two admins demoting each other at
+once cannot both succeed, nor deadlock.
+
+Each name on the list of users opens the account's page
+(/admin/users/:id, lazy, with a budget of its own: 1.1 kB), where an
+admin changes the role.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/api/src/auth/auth.service.ts            |   8 +-
+ apps/api/src/auth/jwt-auth.guard.ts          |   5 +-
+ apps/api/src/telemetry/web-vitals.schemas.ts |   1 +
+ apps/api/src/users/dto/user.schemas.ts       |   4 +
+ apps/api/src/users/user-changes.int.spec.ts  |  96 +++++++++++
+ apps/api/src/users/users.controller.ts       |  31 +++-
+ apps/api/src/users/users.service.spec.ts     |  72 +++++++-
+ apps/api/src/users/users.service.ts          |  56 ++++++-
+ apps/web/performance-budget.json             |   7 +-
+ apps/web/src/api/schema.d.ts                 | 104 +++++++++++-
+ apps/web/src/pages/AdminUserPage.spec.tsx    |  80 +++++++++
+ apps/web/src/pages/AdminUserPage.tsx         | 118 +++++++++++++
+ apps/web/src/pages/AdminUsersPage.spec.tsx   |   5 +
+ apps/web/src/pages/AdminUsersPage.tsx        |   5 +-
+ apps/web/src/router.tsx                      |   8 +
+ docs/authorization.md                        |   2 +
+ docs/manual.es.md                            |   6 +
+ docs/manual.md                               |   6 +
+ docs/security.md                             |   7 +-
+ e2e/users.e2e.ts                             |  52 ++++++
+ openapi/openapi.json                         | 164 +++++++++++++++++++
+ 21 files changed, 819 insertions(+), 18 deletions(-)
+ create mode 100644 apps/api/src/users/user-changes.int.spec.ts
+ create mode 100644 apps/web/src/pages/AdminUserPage.spec.tsx
+ create mode 100644 apps/web/src/pages/AdminUserPage.tsx
+ create mode 100644 e2e/users.e2e.ts
+
+diff --git a/apps/api/src/auth/auth.service.ts b/apps/api/src/auth/auth.service.ts
+index d25b85f..818f517 100644
+--- a/apps/api/src/auth/auth.service.ts
++++ b/apps/api/src/auth/auth.service.ts
+@@ -57,9 +57,11 @@ export class AuthService implements OnModuleInit {
+   }
+ 
+   // The access token carries the id, the role and the securityVersion, read
+-  // fresh from the database at sign-in and at every refresh: a role change
+-  // applies at the next refresh, at most ACCESS_TOKEN_TTL_SEC later; a new
+-  // password at once (the guard compares the securityVersion). Also used by
++  // fresh from the database at sign-in and at every refresh. A role change
++  // and a new password raise the securityVersion, which the guard compares:
++  // the old token ends at once, and the next refresh carries the new role
++  // (a role set straight in the database waits for that refresh, at most
++  // ACCESS_TOKEN_TTL_SEC). Also used by
+   // the account flows that start a session (a password change).
+   async sessionFor(user: AuthUser, securityVersion: number): Promise<AuthSession> {
+     const payload: AccessTokenPayload = { sub: user.id, role: user.role, sv: securityVersion };
+diff --git a/apps/api/src/auth/jwt-auth.guard.ts b/apps/api/src/auth/jwt-auth.guard.ts
+index 797ac03..2ab9b74 100644
+--- a/apps/api/src/auth/jwt-auth.guard.ts
++++ b/apps/api/src/auth/jwt-auth.guard.ts
+@@ -19,8 +19,9 @@ const BEARER = /^Bearer\s+(\S+)\s*$/i;
+ // offline; then one primary-key read compares the token's securityVersion (sv)
+ // with the account's: a new password or a reset ends every access token at
+ // once, not up to 15 minutes later, and a deleted account's tokens stop
+-// working. A role change still applies at the next refresh (the role is the
+-// token's). Role checks are RolesGuard's.
++// working. The role is the token's: a role change raises the securityVersion
++// too (UsersService.update), so the next refresh carries the new one at
++// once. Role checks are RolesGuard's.
+ @Injectable()
+ export class JwtAuthGuard implements CanActivate {
+   constructor(
+diff --git a/apps/api/src/telemetry/web-vitals.schemas.ts b/apps/api/src/telemetry/web-vitals.schemas.ts
+index eb4cae2..3d6b3ed 100644
+--- a/apps/api/src/telemetry/web-vitals.schemas.ts
++++ b/apps/api/src/telemetry/web-vitals.schemas.ts
+@@ -23,6 +23,7 @@ export const WEB_VITALS_ROUTES = [
+   '/accept-invitation',
+   '/account',
+   '/admin/users',
++  '/admin/users/:id',
+   '/admin/invitations',
+   '/*',
+ ] as const;
+diff --git a/apps/api/src/users/dto/user.schemas.ts b/apps/api/src/users/dto/user.schemas.ts
+index c439fbb..b9833b7 100644
+--- a/apps/api/src/users/dto/user.schemas.ts
++++ b/apps/api/src/users/dto/user.schemas.ts
+@@ -15,6 +15,10 @@ export type UserResponse = z.infer<typeof UserSchema>;
+ 
+ export const UserPageSchema = pageOf(UserSchema);
+ 
++// What an admin changes about an account.
++export const UpdateUserSchema = z.strictObject({ role: z.enum(ROLES) });
++export type UpdateUserDto = z.infer<typeof UpdateUserSchema>;
++
+ export const USER_SELECT = {
+   id: true,
+   email: true,
+diff --git a/apps/api/src/users/user-changes.int.spec.ts b/apps/api/src/users/user-changes.int.spec.ts
+new file mode 100644
+index 0000000..d987cfa
+--- /dev/null
++++ b/apps/api/src/users/user-changes.int.spec.ts
+@@ -0,0 +1,96 @@
++import { ConflictException } from '@nestjs/common';
++import request from 'supertest';
++import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
++import { MISSING_ID } from '../../test/access.js';
++import { createTestApp, resetDatabase, type TestApp } from '../../test/app.js';
++import { asUser, bearer, seedUser, signIn } from '../../test/auth.js';
++import { envelopeOf } from '../../test/http.js';
++import type { UserResponse } from './dto/user.schemas.js';
++import { UsersService } from './users.service.js';
++
++interface Seeded {
++  id: string;
++  email: string;
++}
++
++// What admins change about accounts (PATCH /api/users/:id), against
++// PostgreSQL: the access rules, the end of the account's access tokens, and
++// the admin that always remains, under concurrency too.
++describe('Changes to users (integration)', () => {
++  let t: TestApp;
++  let admin: Seeded;
++  let member: Seeded;
++
++  beforeAll(async () => {
++    t = await createTestApp();
++  });
++
++  beforeEach(async () => {
++    await resetDatabase(t.prisma);
++    admin = await seedUser(t.prisma, { email: 'admin@example.com', role: 'admin' });
++    member = await seedUser(t.prisma, { email: 'member@example.com' });
++  });
++
++  afterAll(async () => {
++    await t.app.close();
++  });
++
++  const asAdmin = () => asUser(t.app, admin.id, 'admin');
++  const patch = (id: string, body: object) =>
++    request(t.server).patch(`/api/users/${id}`).send(body);
++
++  describe('PATCH /api/users/:id (admins only): the role', () => {
++    it('needs an admin', async () => {
++      await patch(member.id, { role: 'admin' }).expect(401);
++      await patch(member.id, { role: 'admin' }).set(asUser(t.app, member.id)).expect(403);
++      await expect(t.prisma.user.findUnique({ where: { id: member.id } })).resolves.toMatchObject({
++        role: 'member',
++      });
++    });
++
++    it('validates the change and the id, and answers 404 for an account that does not exist', async () => {
++      await patch(member.id, { role: 'owner' }).set(asAdmin()).expect(400);
++      await patch(member.id, { role: 'admin', email: 'x@example.com' }).set(asAdmin()).expect(400);
++      await patch('123', { role: 'admin' }).set(asAdmin()).expect(400);
++      await patch(MISSING_ID, { role: 'admin' }).set(asAdmin()).expect(404);
++    });
++
++    it("changes the role: the account's access tokens end at once, its next refresh carries it", async () => {
++      const browser = await signIn(t.server, member.email);
++      const res = await patch(member.id, { role: 'admin' }).set(asAdmin()).expect(200);
++      expect(envelopeOf<UserResponse>(res).data).toMatchObject({ id: member.id, role: 'admin' });
++
++      await request(t.server).get('/api/users/me').set(bearer(browser.accessToken)).expect(401);
++      const refreshed = await request(t.server)
++        .post('/api/auth/refresh')
++        .set('Cookie', browser.refreshCookie)
++        .expect(200);
++      expect(envelopeOf<{ user: UserResponse }>(refreshed).data.user.role).toBe('admin');
++    });
++
++    it('keeps the last admin, and lets an admin step down while another remains', async () => {
++      const res = await patch(admin.id, { role: 'member' }).set(asAdmin()).expect(409);
++      expect(envelopeOf(res).message).toBe('The last admin cannot stop being one');
++
++      await patch(member.id, { role: 'admin' }).set(asAdmin()).expect(200);
++      await patch(admin.id, { role: 'member' }).set(asAdmin()).expect(200);
++      await expect(t.prisma.user.count({ where: { role: 'admin' } })).resolves.toBe(1);
++    });
++
++    it('lets only one of two admins demoting each other at once succeed', async () => {
++      const second = await seedUser(t.prisma, { email: 'second@example.com', role: 'admin' });
++      // Through the service: over HTTP, the first change can end the other
++      // admin's access token (401) before its request reaches the lock.
++      const users = t.app.get(UsersService);
++      const outcomes = await Promise.allSettled([
++        users.update(admin.id, second.id, { role: 'member' }),
++        users.update(second.id, admin.id, { role: 'member' }),
++      ]);
++      expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(['fulfilled', 'rejected']);
++      expect(outcomes.find((outcome) => outcome.status === 'rejected')?.reason).toBeInstanceOf(
++        ConflictException,
++      );
++      await expect(t.prisma.user.count({ where: { role: 'admin' } })).resolves.toBe(1);
++    });
++  });
++});
+diff --git a/apps/api/src/users/users.controller.ts b/apps/api/src/users/users.controller.ts
+index d320987..d958149 100644
+--- a/apps/api/src/users/users.controller.ts
++++ b/apps/api/src/users/users.controller.ts
+@@ -1,15 +1,20 @@
+-import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
++import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Query } from '@nestjs/common';
+ import { ApiOperation, ApiTags } from '@nestjs/swagger';
+ import { Auth, RequireRoles } from '../auth/auth.decorator.js';
+ import { CurrentUser } from '../common/decorators/current-user.decorator.js';
+-import { ApiData, ApiErrors, ZodQuery } from '../common/openapi/index.js';
++import { ApiData, ApiErrors, ZodBody, ZodQuery } from '../common/openapi/index.js';
+ import { type PageQuery, PageQuerySchema } from '../common/pagination.js';
+ import type { RequestUser } from '../common/types/request-user.js';
+-import { UserPageSchema, UserSchema } from './dto/user.schemas.js';
++import {
++  type UpdateUserDto,
++  UpdateUserSchema,
++  UserPageSchema,
++  UserSchema,
++} from './dto/user.schemas.js';
+ import { UsersService } from './users.service.js';
+ 
+ // Three access levels on one resource: any signed-in user (me), admins only
+-// (list) and per record (by id: the owner or an admin).
++// (list, changes) and per record (by id: the owner or an admin).
+ @ApiTags('users')
+ @Controller('users')
+ @Auth()
+@@ -44,4 +49,22 @@ export class UsersController {
+   findOne(@CurrentUser() actor: RequestUser, @Param('id', ParseUUIDPipe) id: string) {
+     return this.users.findVisible(actor, id);
+   }
++
++  @Patch(':id')
++  @RequireRoles('admin')
++  @ApiOperation({
++    summary: "Change a user's role (admins only)",
++    description:
++      "The account's access tokens end at once; its next refresh carries the new role. 409: the last admin cannot stop being one.",
++  })
++  @ZodBody(UpdateUserSchema)
++  @ApiData(UserSchema)
++  @ApiErrors(400, 404, 409)
++  update(
++    @CurrentUser() actor: RequestUser,
++    @Param('id', ParseUUIDPipe) id: string,
++    @Body() body: UpdateUserDto,
++  ) {
++    return this.users.update(actor.id, id, body);
++  }
+ }
+diff --git a/apps/api/src/users/users.service.spec.ts b/apps/api/src/users/users.service.spec.ts
+index 0cc1018..d27db1c 100644
+--- a/apps/api/src/users/users.service.spec.ts
++++ b/apps/api/src/users/users.service.spec.ts
+@@ -1,4 +1,4 @@
+-import { NotFoundException } from '@nestjs/common';
++import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
+ import { describe, expect, it, vi } from 'vitest';
+ import type { RequestUser } from '../common/types/request-user.js';
+ import type { PrismaService } from '../prisma/prisma.service.js';
+@@ -70,3 +70,73 @@ describe('UsersService.list', () => {
+     );
+   });
+ });
++
++/** A transaction over one stored account; `otherAdmins` admins besides it. */
++function setupUpdate(current: { role: 'member' | 'admin' } | null, otherAdmins = 1) {
++  const stored = current === null ? null : { ...record(OTHER_ID), ...current };
++  const user = {
++    findUnique: vi.fn().mockResolvedValue(current),
++    findUniqueOrThrow: vi.fn().mockResolvedValue(stored),
++    update: vi.fn(({ data }: { data: { role: string } }) =>
++      Promise.resolve({ ...stored, role: data.role }),
++    ),
++    count: vi.fn().mockResolvedValue(otherAdmins),
++  };
++  // The admins' and the account's row locks (SELECT ... FOR UPDATE).
++  const $queryRaw = vi.fn().mockResolvedValue([]);
++  const tx = { user, $queryRaw };
++  const prisma = {
++    $transaction: vi.fn(<T>(work: (client: typeof tx) => Promise<T>) => work(tx)),
++  } as unknown as PrismaService;
++  vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
++  return { service: new UsersService(prisma), user, $queryRaw };
++}
++
++describe('UsersService.update (role)', () => {
++  it("changes the role and raises the securityVersion: the account's access tokens end", async () => {
++    const { service, user, $queryRaw } = setupUpdate({ role: 'member' });
++    await expect(service.update(ADMIN.id, OTHER_ID, { role: 'admin' })).resolves.toMatchObject({
++      id: OTHER_ID,
++      role: 'admin',
++    });
++    expect(user.update).toHaveBeenCalledWith(
++      expect.objectContaining({
++        where: { id: OTHER_ID },
++        data: { role: 'admin', securityVersion: { increment: 1 } },
++      }),
++    );
++    // A promotion leaves every admin in place: only the account's lock.
++    expect($queryRaw).toHaveBeenCalledOnce();
++  });
++
++  it('locks the admins before a demotion, and keeps the last one', async () => {
++    const demoted = setupUpdate({ role: 'admin' }, 1);
++    await demoted.service.update(ADMIN.id, OTHER_ID, { role: 'member' });
++    // The admins, then the account.
++    expect(demoted.$queryRaw).toHaveBeenCalledTimes(2);
++    expect(demoted.user.count).toHaveBeenCalledWith({
++      where: { role: 'admin', id: { not: OTHER_ID } },
++    });
++
++    const last = setupUpdate({ role: 'admin' }, 0);
++    await expect(last.service.update(OTHER_ID, OTHER_ID, { role: 'member' })).rejects.toThrow(
++      new ConflictException('The last admin cannot stop being one'),
++    );
++    expect(last.user.update).not.toHaveBeenCalled();
++  });
++
++  it('changes nothing for the role the account already has', async () => {
++    const { service, user } = setupUpdate({ role: 'member' });
++    await expect(service.update(ADMIN.id, OTHER_ID, { role: 'member' })).resolves.toMatchObject({
++      role: 'member',
++    });
++    expect(user.update).not.toHaveBeenCalled();
++  });
++
++  it('answers 404 for an account that does not exist', async () => {
++    const { service } = setupUpdate(null);
++    await expect(service.update(ADMIN.id, OTHER_ID, { role: 'admin' })).rejects.toThrow(
++      NotFoundException,
++    );
++  });
++});
+diff --git a/apps/api/src/users/users.service.ts b/apps/api/src/users/users.service.ts
+index 9844c41..4a32799 100644
+--- a/apps/api/src/users/users.service.ts
++++ b/apps/api/src/users/users.service.ts
+@@ -1,13 +1,23 @@
+-import { Injectable, NotFoundException } from '@nestjs/common';
++import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
++import { lockUser } from '../auth/sessions.service.js';
+ import type { Page, PageQuery } from '../common/pagination.js';
+ import type { RequestUser } from '../common/types/request-user.js';
++import { Prisma } from '../prisma/generated/client.js';
+ import { PrismaService } from '../prisma/prisma.service.js';
+-import { USER_SELECT } from './dto/user.schemas.js';
++import { type UpdateUserDto, USER_SELECT } from './dto/user.schemas.js';
+ 
+ type User = Awaited<ReturnType<UsersService['me']>>;
++type Tx = Prisma.TransactionClient;
++
++// READ COMMITTED, as every transaction that takes a user's lock
++// (sessions.service.ts): what it reads after a lock is what the transaction
++// it waited for committed.
++const USER_TRANSACTION = { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted };
+ 
+ @Injectable()
+ export class UsersService {
++  private readonly logger = new Logger(UsersService.name);
++
+   constructor(private readonly prisma: PrismaService) {}
+ 
+   async me(id: string) {
+@@ -45,4 +55,46 @@ export class UsersService {
+     if (!user) throw new NotFoundException('User not found');
+     return user;
+   }
++
++  /**
++   * An admin changes an account, their own included: its role. In one
++   * transaction under the account's lock, the change raises the account's
++   * securityVersion, so its access tokens end at once and the next refresh
++   * carries the new role (its sessions go on). One admin always remains.
++   */
++  async update(adminId: string, id: string, changes: UpdateUserDto): Promise<User> {
++    const user = await this.prisma.$transaction(async (tx) => {
++      if (changes.role !== 'admin') await lockAdmins(tx);
++      await lockUser(tx, id);
++      const current = await tx.user.findUnique({ where: { id }, select: { role: true } });
++      if (!current) throw new NotFoundException('User not found');
++      if (current.role === changes.role) {
++        return tx.user.findUniqueOrThrow({ where: { id }, select: USER_SELECT });
++      }
++      if (current.role === 'admin') await assertAnotherAdmin(tx, id);
++      return tx.user.update({
++        where: { id },
++        data: { role: changes.role, securityVersion: { increment: 1 } },
++        select: USER_SELECT,
++      });
++    }, USER_TRANSACTION);
++    this.logger.log(`User ${id} has the role ${user.role}, set by admin ${adminId}`);
++    return user;
++  }
++}
++
++/**
++ * Locks every admin's row, in one order: a change that may leave the project
++ * without an admin (a demotion) runs one at a time, so two admins demoting
++ * each other at once cannot both succeed, and they wait for each other
++ * instead of deadlocking.
++ */
++async function lockAdmins(tx: Tx): Promise<void> {
++  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "role" = 'admin' ORDER BY "id" FOR UPDATE`;
++}
++
++/** 409 unless an admin other than `id` remains; under lockAdmins. */
++async function assertAnotherAdmin(tx: Tx, id: string): Promise<void> {
++  const others = await tx.user.count({ where: { role: 'admin', id: { not: id } } });
++  if (others === 0) throw new ConflictException('The last admin cannot stop being one');
+ }
+diff --git a/apps/web/performance-budget.json b/apps/web/performance-budget.json
+index c9ecc81..83ad7cd 100644
+--- a/apps/web/performance-budget.json
++++ b/apps/web/performance-budget.json
+@@ -1,5 +1,5 @@
+ {
+-  "$comment": "Gzip size budgets for the built web assets, checked by `pnpm perf:check` after `pnpm build`. Set from the template's measured build rounded up: the initial JavaScript (every visit: the entry index.html loads and the chunks it preloads, whatever the bundler names them) 108.1 kB, the error tracking chunk (fetched only when WEB_SENTRY_DSN is set) 31 kB, the Web Vitals chunks (fetched after the first render, the library only for sampled page loads) 4.2 kB, the account and admin pages (password recovery and change, sign-up and its confirmation, change of email and its undo, invitations and their acceptance, fetched when opened, with the helpers only they use) 12.2 kB, the focus and error handling of their forms included, CSS 0.6 kB. The total keeps a new lazy chunk from hiding outside the named ones; it grew from 145 to 157 kB with the account and admin pages. Each project sets its own from its performance targets (docs/testing.md#performance-budget).",
++  "$comment": "Gzip size budgets for the built web assets, checked by `pnpm perf:check` after `pnpm build`. Set from the template's measured build rounded up: the initial JavaScript (every visit: the entry index.html loads and the chunks it preloads, whatever the bundler names them) 108.1 kB, the error tracking chunk (fetched only when WEB_SENTRY_DSN is set) 31 kB, the Web Vitals chunks (fetched after the first render, the library only for sampled page loads) 4.2 kB, the account and admin pages (password recovery and change, sign-up and its confirmation, change of email and its undo, invitations and their acceptance, fetched when opened, with the helpers only they use) 12.2 kB, the focus and error handling of their forms included, an account's page for admins (its role, fetched when opened from the list of users) 1.1 kB, CSS 0.6 kB. The total keeps a new lazy chunk from hiding outside the named ones; it grew from 145 to 157 kB with the account and admin pages. Each project sets its own from its performance targets (docs/testing.md#performance-budget).",
+   "budgets": [
+     {
+       "name": "JavaScript, initial",
+@@ -21,6 +21,11 @@
+       "pattern": "^(ForgotPasswordPage|ResetPasswordPage|AccountPage|SignUpPage|ConfirmSignUpPage|ConfirmEmailChangePage|RevertEmailChangePage|AcceptInvitationPage|AdminInvitationsPage|PasswordField|password-rules|useLinkToken)-[^.]+\\.js$",
+       "maxGzipKb": 13
+     },
++    {
++      "name": "JavaScript, an account's page (lazy, admins only)",
++      "pattern": "^AdminUserPage-[^.]+\\.js$",
++      "maxGzipKb": 1.5
++    },
+     {
+       "name": "JavaScript, total",
+       "pattern": "\\.js$",
+diff --git a/apps/web/src/api/schema.d.ts b/apps/web/src/api/schema.d.ts
+index 9d23295..e414e73 100644
+--- a/apps/web/src/api/schema.d.ts
++++ b/apps/web/src/api/schema.d.ts
+@@ -344,7 +344,11 @@ export interface paths {
+         delete?: never;
+         options?: never;
+         head?: never;
+-        patch?: never;
++        /**
++         * Change a user's role (admins only)
++         * @description The account's access tokens end at once; its next refresh carries the new role. 409: the last admin cannot stop being one.
++         */
++        patch: operations["UsersController_update"];
+         trace?: never;
+     };
+     "/api/health/live": {
+@@ -1744,6 +1748,102 @@ export interface operations {
+             };
+         };
+     };
++    UsersController_update: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                id: string;
++            };
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": {
++                    /** @enum {string} */
++                    role: "member" | "admin";
++                };
++            };
++        };
++        responses: {
++            /** @description OK */
++            200: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": {
++                        data: {
++                            /** Format: uuid */
++                            id: string;
++                            /** Format: email */
++                            email: string;
++                            name: string;
++                            /** @enum {string} */
++                            role: "member" | "admin";
++                            /** Format: date-time */
++                            createdAt: string;
++                        };
++                        message: string;
++                    };
++                };
++            };
++            /** @description Validation failed */
++            400: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not authenticated */
++            401: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not allowed */
++            403: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not found */
++            404: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Conflict */
++            409: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Rate limit exceeded */
++            429: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++        };
++    };
+     HealthController_live: {
+         parameters: {
+             query?: never;
+@@ -1825,7 +1925,7 @@ export interface operations {
+             content: {
+                 "application/json": {
+                     /** @enum {string} */
+-                    route: "/" | "/sign-in" | "/forgot-password" | "/reset-password" | "/sign-up" | "/confirm-sign-up" | "/confirm-email-change" | "/revert-email-change" | "/accept-invitation" | "/account" | "/admin/users" | "/admin/invitations" | "/*";
++                    route: "/" | "/sign-in" | "/forgot-password" | "/reset-password" | "/sign-up" | "/confirm-sign-up" | "/confirm-email-change" | "/revert-email-change" | "/accept-invitation" | "/account" | "/admin/users" | "/admin/users/:id" | "/admin/invitations" | "/*";
+                     metrics: ({
+                         /** @enum {string} */
+                         name: "FCP" | "INP" | "LCP" | "TTFB";
+diff --git a/apps/web/src/pages/AdminUserPage.spec.tsx b/apps/web/src/pages/AdminUserPage.spec.tsx
+new file mode 100644
+index 0000000..699e2a0
+--- /dev/null
++++ b/apps/web/src/pages/AdminUserPage.spec.tsx
+@@ -0,0 +1,80 @@
++import { screen } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++import { resetForTests, setSession } from '../auth/session';
++import { admin, member } from '../test/fixtures';
++import { failure, ok, stubFetch } from '../test/http';
++import { renderRoute } from '../test/render';
++
++const USER = `GET /api/users/${member.id}`;
++const UPDATE = `PATCH /api/users/${member.id}`;
++const record = (changes: Partial<typeof member> = {}) => ({
++  ...member,
++  createdAt: '2026-01-01T00:00:00.000Z',
++  ...changes,
++});
++const PAGE = `/admin/users/${member.id}`;
++
++beforeEach(() => {
++  resetForTests();
++  setSession({ accessToken: 'admin-token', expiresIn: 900, user: admin });
++});
++afterEach(() => {
++  resetForTests();
++});
++
++describe('AdminUserPage', () => {
++  it('shows the account, with a way back to every user', async () => {
++    stubFetch({ [USER]: () => ok(record()) });
++    renderRoute(PAGE);
++
++    expect(await screen.findByRole('heading', { name: member.name })).toBeInTheDocument();
++    expect(screen.getByText(member.email)).toBeInTheDocument();
++    expect(screen.getByRole('link', { name: 'All users' })).toHaveAttribute('href', '/admin/users');
++  });
++
++  it('changes the role, and shows the account as the API answered', async () => {
++    const { calls } = stubFetch({
++      [USER]: () => ok(record()),
++      [UPDATE]: () => ok(record({ role: 'admin' })),
++    });
++    renderRoute(PAGE);
++    const user = userEvent.setup();
++    await user.selectOptions(await screen.findByLabelText('Role'), 'admin');
++    await user.click(screen.getByRole('button', { name: 'Change role' }));
++
++    expect(await screen.findByText(`${member.name} is now an admin.`)).toBeInTheDocument();
++    const update = calls.find((request) => request.method === 'PATCH');
++    expect(await update?.json()).toEqual({ role: 'admin' });
++    expect(screen.getByText('admin', { selector: 'dd' })).toBeInTheDocument();
++    expect(screen.getByLabelText('Role')).toHaveValue('admin');
++  });
++
++  it('says why the last admin keeps the role, and when the account is gone', async () => {
++    let answer = () => failure(409, 'The last admin cannot stop being one');
++    stubFetch({ [USER]: () => ok(record({ role: 'admin' })), [UPDATE]: () => answer() });
++    renderRoute(PAGE);
++    const user = userEvent.setup();
++    await user.selectOptions(await screen.findByLabelText('Role'), 'member');
++    await user.click(screen.getByRole('button', { name: 'Change role' }));
++    expect(await screen.findByRole('alert')).toHaveTextContent(
++      'This is the last admin: make another account an admin first.',
++    );
++
++    answer = () => failure(404, 'User not found');
++    await user.click(screen.getByRole('button', { name: 'Change role' }));
++    expect(await screen.findByText('This account no longer exists.')).toBeInTheDocument();
++  });
++
++  it('explains a failure to load and retries on demand', async () => {
++    let attempt = 0;
++    stubFetch({
++      [USER]: () => (attempt++ === 0 ? failure(503, 'Database unreachable') : ok(record())),
++    });
++    renderRoute(PAGE);
++
++    expect(await screen.findByRole('alert')).toHaveTextContent('The service is unavailable');
++    await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }));
++    expect(await screen.findByRole('heading', { name: member.name })).toBeInTheDocument();
++  });
++});
+diff --git a/apps/web/src/pages/AdminUserPage.tsx b/apps/web/src/pages/AdminUserPage.tsx
+new file mode 100644
+index 0000000..ae49a66
+--- /dev/null
++++ b/apps/web/src/pages/AdminUserPage.tsx
+@@ -0,0 +1,118 @@
++import { useState } from 'react';
++import { Link, useParams } from 'react-router';
++import { api } from '../api/client';
++import { type ApiFailure, call, describeFailure } from '../api/errors';
++import type { Role } from '../auth/types';
++import { Alert } from '../components/Alert';
++import { LoadFailed } from '../components/LoadFailed';
++import { useLoader } from '../hooks/useLoader';
++
++const fetchUser = (id: string) => call(api.GET('/api/users/{id}', { params: { path: { id } } }));
++
++type User = Extract<Awaited<ReturnType<typeof fetchUser>>, { ok: true }>['data'];
++
++/** What a refused change means here, in the words of this page. */
++function changeFailure(failure: ApiFailure): string {
++  if (failure.status === 404) return 'This account no longer exists.';
++  if (failure.status === 409) return 'This is the last admin: make another account an admin first.';
++  return describeFailure(failure);
++}
++
++/**
++ * Admins only: the route is guarded here and, authoritatively, by the API.
++ * One account, and what an admin changes about it: its role (its access
++ * ends at once, and its next refresh carries the new role).
++ */
++export function AdminUserPage() {
++  const { id = '' } = useParams();
++  const { state, retry } = useLoader(() => fetchUser(id), id);
++  // The account as the last change answered it, shown over the one loaded:
++  // no reload, so the page keeps its place and the focus.
++  const [updated, setUpdated] = useState<User | null>(null);
++  const user = updated?.id === id ? updated : state.kind === 'loaded' ? state.data : null;
++  const [notice, setNotice] = useState<string | null>(null);
++  const [failure, setFailure] = useState<string | null>(null);
++
++  async function changeRole(role: Role): Promise<void> {
++    setNotice(null);
++    setFailure(null);
++    const result = await call(
++      api.PATCH('/api/users/{id}', { params: { path: { id } }, body: { role } }),
++    );
++    if (result.ok) {
++      setUpdated(result.data);
++      setNotice(`${result.data.name} is now ${role === 'admin' ? 'an admin' : 'a member'}.`);
++    } else {
++      setFailure(changeFailure(result.failure));
++    }
++  }
++
++  return (
++    <section className="stack" aria-labelledby="user-heading">
++      <p>
++        <Link to="/admin/users">All users</Link>
++      </p>
++      <h1 id="user-heading">{user?.name ?? 'User'}</h1>
++      {user === null && state.kind === 'loading' && <p role="status">Loading the account…</p>}
++      {user === null && state.kind === 'failed' && (
++        <LoadFailed
++          failure={state.failure}
++          retrying={state.retrying}
++          onRetry={() => void retry()}
++        />
++      )}
++      {user !== null && (
++        <>
++          {notice !== null && <Alert tone="info">{notice}</Alert>}
++          {failure !== null && <Alert>{failure}</Alert>}
++          <dl className="account-details">
++            <dt>Email</dt>
++            <dd>{user.email}</dd>
++            <dt>Role</dt>
++            <dd>{user.role}</dd>
++            <dt>Account created</dt>
++            <dd>{new Date(user.createdAt).toLocaleString()}</dd>
++          </dl>
++          {/* A new form when the role it shows changes: it starts from the account's. */}
++          <RoleForm key={user.role} user={user} onChange={changeRole} />
++        </>
++      )}
++    </section>
++  );
++}
++
++function RoleForm({ user, onChange }: { user: User; onChange: (role: Role) => Promise<void> }) {
++  const [role, setRole] = useState<Role>(user.role);
++  const [submitting, setSubmitting] = useState(false);
++  return (
++    <form
++      className="stack auth-form"
++      aria-labelledby="role-heading"
++      onSubmit={(event) => {
++        event.preventDefault();
++        setSubmitting(true);
++        void onChange(role).finally(() => {
++          setSubmitting(false);
++        });
++      }}
++    >
++      <h2 id="role-heading">Change the role</h2>
++      <div className="field">
++        <label htmlFor="user-role">Role</label>
++        <select
++          id="user-role"
++          value={role}
++          onChange={(event) => {
++            setRole(event.target.value === 'admin' ? 'admin' : 'member');
++          }}
++        >
++          <option value="member">Member</option>
++          <option value="admin">Admin</option>
++        </select>
++      </div>
++      <button type="submit" disabled={submitting}>
++        {submitting ? 'Saving…' : 'Change role'}
++      </button>
++    </form>
++  );
++}
+diff --git a/apps/web/src/pages/AdminUsersPage.spec.tsx b/apps/web/src/pages/AdminUsersPage.spec.tsx
+index eaf76d2..75c6301 100644
+--- a/apps/web/src/pages/AdminUsersPage.spec.tsx
++++ b/apps/web/src/pages/AdminUsersPage.spec.tsx
+@@ -26,6 +26,11 @@ describe('AdminUsersPage', () => {
+ 
+     expect(await screen.findByRole('cell', { name: member.email })).toBeInTheDocument();
+     expect(screen.getByText('Showing 2 of 2.')).toBeInTheDocument();
++    // Each name opens the account's page.
++    expect(screen.getByRole('link', { name: member.name })).toHaveAttribute(
++      'href',
++      `/admin/users/${member.id}`,
++    );
+     expect(new URL(calls[0]?.url ?? '').searchParams.get('limit')).toBe('50');
+     expect(calls[0]?.headers.get('Authorization')).toBe('Bearer admin-token');
+   });
+diff --git a/apps/web/src/pages/AdminUsersPage.tsx b/apps/web/src/pages/AdminUsersPage.tsx
+index b0bb955..fc9f33a 100644
+--- a/apps/web/src/pages/AdminUsersPage.tsx
++++ b/apps/web/src/pages/AdminUsersPage.tsx
+@@ -1,3 +1,4 @@
++import { Link } from 'react-router';
+ import { api } from '../api/client';
+ import { call } from '../api/errors';
+ import { LoadFailed } from '../components/LoadFailed';
+@@ -37,7 +38,9 @@ export function AdminUsersPage() {
+             <tbody>
+               {state.data.items.map((user) => (
+                 <tr key={user.id}>
+-                  <td>{user.name}</td>
++                  <td>
++                    <Link to={`/admin/users/${user.id}`}>{user.name}</Link>
++                  </td>
+                   <td>{user.email}</td>
+                   <td>{user.role}</td>
+                 </tr>
+diff --git a/apps/web/src/router.tsx b/apps/web/src/router.tsx
+index 97b1d65..f3f858c 100644
+--- a/apps/web/src/router.tsx
++++ b/apps/web/src/router.tsx
+@@ -86,6 +86,14 @@ export const routes = createRoutesFromElements(
+         />
+         <Route element={<RequireRole role="admin" />}>
+           <Route path="admin/users" element={<AdminUsersPage />} />
++          <Route
++            path="admin/users/:id"
++            lazy={() =>
++              import('./pages/AdminUserPage').then(({ AdminUserPage }) => ({
++                Component: AdminUserPage,
++              }))
++            }
++          />
+           <Route
+             path="admin/invitations"
+             lazy={() =>
+diff --git a/docs/authorization.md b/docs/authorization.md
+index fe17472..d10a672 100644
+--- a/docs/authorization.md
++++ b/docs/authorization.md
+@@ -23,6 +23,8 @@ one handler to a role, use `@RequireRoles('admin')`. A handler-level `@Auth('adm
+ replace its controller's (`RolesGuard`), and a handler without roles inherits them, so a handler
+ can never loosen an `@Auth('admin')` controller. Roles live in `common/types/request-user.ts` and
+ the Prisma `Role` enum, and adding one is a recipe of its own ([how-to.md](how-to.md#add-a-role)).
++Admins change an account's role with `PATCH /api/users/:id`; the last admin cannot stop being one
++([security.md](security.md#authorization)).
+ 
+ ## Object level: the rules
+ 
+diff --git a/docs/manual.es.md b/docs/manual.es.md
+index 0bd67ee..e81328c 100644
+--- a/docs/manual.es.md
++++ b/docs/manual.es.md
+@@ -904,6 +904,12 @@ pendientes se pueden reenviar o revocar. Pruébalo en local: inicia sesión como
+ invita cualquier dirección y abre el enlace desde Mailpit. El diseño:
+ [security.md](security.md#invitations).
+ 
++**Administrar cuentas.** En "Users", cada nombre abre la página de la cuenta, donde un
++administrador cambia su rol. El cambio aplica de inmediato: la siguiente página de esa persona ya
++tiene el rol nuevo, sin volver a iniciar sesión. El último administrador no puede dejar de serlo.
++Pruébalo en local: inicia sesión como `admin@example.com`, abre "Users", luego "Member", y hazlo
++admin. El diseño: [security.md](security.md#authorization).
++
+ ## 12. Operar en producción
+ 
+ | Antes y durante la operación               | Dónde                                                         |
+diff --git a/docs/manual.md b/docs/manual.md
+index 96a2369..7624275 100644
+--- a/docs/manual.md
++++ b/docs/manual.md
+@@ -871,6 +871,12 @@ password, and is signed in with that role. Pending invitations can be sent again
+ it locally: sign in as `admin@example.com`, invite any address, and open the link from Mailpit. The
+ design: [security.md](security.md#invitations).
+ 
++**Managing accounts.** On "Users", each name opens the account's page, where an administrator
++changes its role. The change applies at once: the person's next page already has the new role,
++without signing in again. The last administrator cannot stop being one. Try it locally: sign in as
++`admin@example.com`, open "Users", then "Member", and make it an admin. The design:
++[security.md](security.md#authorization).
++
+ ## 12. Running in production
+ 
+ | Before and while running               | Where                                                         |
+diff --git a/docs/security.md b/docs/security.md
+index ea64349..0a81d5a 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -294,8 +294,11 @@ Two layers, both required:
+    admin access) and the access-matrix test every such route gets:
+    [authorization.md](authorization.md).
+ 
+-Role changes apply at the next refresh. An access token already issued stays valid until it
+-expires (at most 15 minutes) unless the account's `security_version` changes: a password change
++An admin changes a role with `PATCH /api/users/:id` (the account's page, `/admin/users/:id`): the
++change raises the account's `security_version`, so its access tokens end at once and its next
++refresh carries the new role; its sessions go on. One admin always remains: a demotion locks every
++admin's row first, so two admins demoting each other at once cannot both succeed. An access token
++already issued stays valid until it expires (at most 15 minutes) unless the account's `security_version` changes: a password change
+ or reset increments it, and `JwtAuthGuard` then refuses every older access token at once.
+ `SessionsService.revokeAll(userId)`, and `endSessionsLocked(tx, userId)` inside a transaction that
+ holds the user's lock, end every refresh session and raise it in the same transaction: use them
+diff --git a/e2e/users.e2e.ts b/e2e/users.e2e.ts
+new file mode 100644
+index 0000000..0de533c
+--- /dev/null
++++ b/e2e/users.e2e.ts
+@@ -0,0 +1,52 @@
++import type { Page } from '@playwright/test';
++import { type Account, createAccount } from './support/accounts.js';
++import { expect, test } from './support/fixtures.js';
++
++// What an administrator changes about an account, in real browsers: the
++// administrator's, and the person's own, signed in at the same time.
++
++// The development administrator created by the API seed (apps/api/src/seed/seed.ts).
++const ADMIN = { email: 'admin@example.com', password: 'admin-password' };
++
++async function signIn(page: Page, email: string, password: string) {
++  await page.goto('/sign-in');
++  await page.getByLabel('Email').fill(email);
++  await page.getByLabel('Password', { exact: true }).fill(password);
++  await page.getByRole('button', { name: 'Sign in' }).click();
++}
++
++/**
++ * From the home page, through the list of users, to one account's page: by
++ * its row's address, as names repeat (other suites create accounts too).
++ */
++async function openAccount(page: Page, account: Account) {
++  await page.getByRole('link', { name: 'Users' }).click();
++  await page.getByRole('row').filter({ hasText: account.email }).getByRole('link').click();
++  await expect(page.getByRole('heading', { name: account.name, level: 1 })).toBeVisible();
++}
++
++test('an administrator makes a member an admin: their next page has the admin pages', async ({
++  page,
++  browser,
++}) => {
++  const person = createAccount('Katherine Johnson');
++  const theirs = await browser.newContext();
++  const theirPage = await theirs.newPage();
++  await signIn(theirPage, person.email, person.password);
++  await expect(theirPage.getByRole('heading', { name: `Welcome, ${person.name}` })).toBeVisible();
++  await expect(theirPage.getByRole('link', { name: 'Users' })).toHaveCount(0);
++
++  await signIn(page, ADMIN.email, ADMIN.password);
++  await expect(page.getByRole('heading', { name: 'Welcome, Admin' })).toBeVisible();
++  await openAccount(page, person);
++  await page.getByLabel('Role', { exact: true }).selectOption('admin');
++  await page.getByRole('button', { name: 'Change role' }).click();
++  await expect(
++    page.getByRole('status').filter({ hasText: `${person.name} is now an admin.` }),
++  ).toBeVisible();
++
++  // Their access token ended with the change; the session goes on, with the new role.
++  await theirPage.reload();
++  await expect(theirPage.getByRole('link', { name: 'Users' })).toBeVisible();
++  await theirs.close();
++});
+diff --git a/openapi/openapi.json b/openapi/openapi.json
+index 99402b5..d35e2e2 100644
+--- a/openapi/openapi.json
++++ b/openapi/openapi.json
+@@ -2148,6 +2148,169 @@
+         "tags": [
+           "users"
+         ]
++      },
++      "patch": {
++        "description": "The account's access tokens end at once; its next refresh carries the new role. 409: the last admin cannot stop being one.",
++        "operationId": "UsersController_update",
++        "parameters": [
++          {
++            "name": "id",
++            "required": true,
++            "in": "path",
++            "schema": {
++              "type": "string",
++              "format": "uuid"
++            }
++          }
++        ],
++        "requestBody": {
++          "required": true,
++          "content": {
++            "application/json": {
++              "schema": {
++                "type": "object",
++                "properties": {
++                  "role": {
++                    "type": "string",
++                    "enum": [
++                      "member",
++                      "admin"
++                    ]
++                  }
++                },
++                "required": [
++                  "role"
++                ],
++                "additionalProperties": false
++              }
++            }
++          }
++        },
++        "responses": {
++          "200": {
++            "description": "OK",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "type": "object",
++                  "required": [
++                    "data",
++                    "message"
++                  ],
++                  "properties": {
++                    "data": {
++                      "type": "object",
++                      "properties": {
++                        "id": {
++                          "type": "string",
++                          "format": "uuid"
++                        },
++                        "email": {
++                          "type": "string",
++                          "format": "email"
++                        },
++                        "name": {
++                          "type": "string"
++                        },
++                        "role": {
++                          "type": "string",
++                          "enum": [
++                            "member",
++                            "admin"
++                          ]
++                        },
++                        "createdAt": {
++                          "type": "string",
++                          "format": "date-time"
++                        }
++                      },
++                      "required": [
++                        "id",
++                        "email",
++                        "name",
++                        "role",
++                        "createdAt"
++                      ],
++                      "additionalProperties": false
++                    },
++                    "message": {
++                      "type": "string"
++                    }
++                  }
++                }
++              }
++            }
++          },
++          "400": {
++            "description": "Validation failed",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "401": {
++            "description": "Not authenticated",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "403": {
++            "description": "Not allowed",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "404": {
++            "description": "Not found",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "409": {
++            "description": "Conflict",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "429": {
++            "description": "Rate limit exceeded",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          }
++        },
++        "security": [
++          {
++            "bearer": []
++          }
++        ],
++        "summary": "Change a user's role (admins only)",
++        "tags": [
++          "users"
++        ]
+       }
+     },
+     "/api/health/live": {
+@@ -2317,6 +2480,7 @@
+                       "/accept-invitation",
+                       "/account",
+                       "/admin/users",
++                      "/admin/users/:id",
+                       "/admin/invitations",
+                       "/*"
+                     ]

@@ -1,0 +1,14 @@
+# Prettier also skips everything in .gitignore.
+
+# Generated and committed: written by tools, checked by drift gates.
+pnpm-lock.yaml
+openapi/openapi.json
+apps/web/src/api/schema.d.ts
+packages/audit-contract/schema/
+apps/api/prisma/migrations/
+# Written by release-please (.github/workflows/release.yml).
+CHANGELOG.md
+.release-please-manifest.json
+
+# Generated example projects: each formats itself (docs/adr/0010).
+.examples/

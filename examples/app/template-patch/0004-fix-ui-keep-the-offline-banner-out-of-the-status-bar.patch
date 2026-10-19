@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 20:46:32 -0600
+Subject: [PATCH 4/4] fix(ui): keep the offline banner out of the status bar
+
+The app draws edge to edge (target SDK 36: Android 15 and later enforce
+it), and the offline banner sat above the stack with no top inset: on
+those phones it was drawn under the status bar, over the clock, and
+Maestro's 05-offline could not see it there.
+
+OfflineBanner now takes the status bar's place (the top inset as its
+padding) and wraps the screens below it, which get a top inset of 0
+while it shows, so their headers do not leave that space a second time.
+The tree below stays the same online and offline: the navigation state
+is kept. A component spec covers the insets and the single mount; the
+05-offline flow passes on an API 36 emulator.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ docs/MOBILE_ARCHITECTURE.md           |  2 +-
+ src/app/(app)/_layout.tsx             |  6 ++--
+ src/ui/components/OfflineBanner.tsx   | 43 +++++++++++++++++++--------
+ src/ui/components/components.spec.tsx | 36 +++++++++++++++++++++-
+ 4 files changed, 70 insertions(+), 17 deletions(-)
+
+diff --git a/docs/MOBILE_ARCHITECTURE.md b/docs/MOBILE_ARCHITECTURE.md
+index e4da346..5912521 100644
+--- a/docs/MOBILE_ARCHITECTURE.md
++++ b/docs/MOBILE_ARCHITECTURE.md
+@@ -348,7 +348,7 @@ capability is classified as in [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md
+ | Capability                   | Behavior                                                                                                                                                                                               | Where                          |
+ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
+ | Network awareness            | TanStack Query knows when the device is offline and when the app returns to the foreground                                                                                                             | `src/lib/query/network.ts`     |
+-| Offline banner               | says the data shown may be stale; announced by screen readers                                                                                                                                          | `OfflineBanner`                |
++| Offline banner               | says the data shown may be stale; announced by screen readers; in the status bar's place (edge to edge), the headers below it then leaving no gap                                                      | `OfflineBanner`                |
+ | Paused and refetched queries | queries do not fail offline: they pause, and refetch when the network returns                                                                                                                          | TanStack Query `onlineManager` |
+ | Graceful failures            | a write offline fails at once with "You seem to be offline…", is not retried, keeps what the user typed                                                                                                | `src/lib/errors.ts`, forms     |
+ | Offline cold start           | a stored session stays signed in; renewal waits for the network                                                                                                                                        | `src/auth/session.ts`          |
+diff --git a/src/app/(app)/_layout.tsx b/src/app/(app)/_layout.tsx
+index cf0425f..ba26382 100644
+--- a/src/app/(app)/_layout.tsx
++++ b/src/app/(app)/_layout.tsx
+@@ -19,8 +19,8 @@ export default function AppLayout() {
+   usePushTokenChanges(refreshPushToken);
+   useIdentifyUser();
+   return (
+-    <>
+-      <OfflineBanner />
++    // While offline the banner takes the status bar's place above the screens.
++    <OfflineBanner>
+       <Stack>
+         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+         <Stack.Screen name="items/[id]" options={{ title: 'Item' }} />
+@@ -36,7 +36,7 @@ export default function AppLayout() {
+         <Stack.Screen name="security/activity" options={{ title: 'Account security' }} />
+         <Stack.Screen name="security/prompts/[id]" options={{ title: 'Was it you?' }} />
+       </Stack>
+-    </>
++    </OfflineBanner>
+   );
+ }
+ 
+diff --git a/src/ui/components/OfflineBanner.tsx b/src/ui/components/OfflineBanner.tsx
+index a6f1735..9cbd15b 100644
+--- a/src/ui/components/OfflineBanner.tsx
++++ b/src/ui/components/OfflineBanner.tsx
+@@ -1,8 +1,9 @@
+ import { onlineManager } from '@tanstack/react-query';
+-import { useSyncExternalStore } from 'react';
++import { type ReactNode, useMemo, useSyncExternalStore } from 'react';
+ import { View } from 'react-native';
++import { SafeAreaInsetsContext, useSafeAreaInsets } from 'react-native-safe-area-context';
+ 
+-import { createStyles } from '../theme/ThemeProvider';
++import { createStyles, useTheme } from '../theme/ThemeProvider';
+ import { Icon } from './Icon';
+ import { AlertText } from './AlertText';
+ 
+@@ -12,7 +13,7 @@ const useStyles = createStyles((theme) => ({
+     alignItems: 'center',
+     gap: theme.spacing.sm,
+     paddingHorizontal: theme.spacing.lg,
+-    paddingVertical: theme.spacing.sm,
++    paddingBottom: theme.spacing.sm,
+     backgroundColor: theme.colors.surfaceMuted,
+   },
+ }));
+@@ -25,16 +26,34 @@ export function useIsOnline(): boolean {
+   );
+ }
+ 
+-/** Tells the user why fresh data is not coming; cached screens keep working. */
+-export function OfflineBanner() {
++/**
++ * Tells the user why fresh data is not coming; cached screens keep working.
++ *
++ * The app draws edge to edge (Android 15 and later, iOS): the banner takes the
++ * status bar's place, and the screens below it (`children`) get no top inset
++ * while it shows, so their headers do not leave that space again. The tree
++ * below is the same online and offline: its navigation state is kept.
++ */
++export function OfflineBanner({ children }: { children?: ReactNode }) {
+   const styles = useStyles();
+-  if (useIsOnline()) return null;
++  const theme = useTheme();
++  const insets = useSafeAreaInsets();
++  const online = useIsOnline();
++  const below = useMemo(() => (online ? insets : { ...insets, top: 0 }), [online, insets]);
+   return (
+-    <View style={styles.banner}>
+-      <Icon name="cloud-offline-outline" size="sm" color="textMuted" />
+-      <AlertText variant="caption" tone="muted">
+-        You are offline. Showing saved data.
+-      </AlertText>
+-    </View>
++    <>
++      {!online && (
++        <View
++          style={[styles.banner, { paddingTop: insets.top + theme.spacing.sm }]}
++          testID="offline-banner"
++        >
++          <Icon name="cloud-offline-outline" size="sm" color="textMuted" />
++          <AlertText variant="caption" tone="muted">
++            You are offline. Showing saved data.
++          </AlertText>
++        </View>
++      )}
++      <SafeAreaInsetsContext.Provider value={below}>{children}</SafeAreaInsetsContext.Provider>
++    </>
+   );
+ }
+diff --git a/src/ui/components/components.spec.tsx b/src/ui/components/components.spec.tsx
+index 24854b1..22037c7 100644
+--- a/src/ui/components/components.spec.tsx
++++ b/src/ui/components/components.spec.tsx
+@@ -1,7 +1,8 @@
+ import { onlineManager } from '@tanstack/react-query';
+ import { act, fireEvent, screen, userEvent, waitFor } from '@testing-library/react-native';
+-import { createRef } from 'react';
++import { createRef, useEffect } from 'react';
+ import { AccessibilityInfo, Platform, type TextInput } from 'react-native';
++import { SafeAreaInsetsContext, useSafeAreaInsets } from 'react-native-safe-area-context';
+ 
+ import { AppError } from '@/lib/errors';
+ import { DEFAULT_PREFERENCES, usePreferences } from '@/store/preferences';
+@@ -10,6 +11,7 @@ import { renderWithProviders } from '@/test/render';
+ 
+ import { resolveScheme, useTheme } from '../theme/ThemeProvider';
+ import { themes } from '../theme/theme';
++import { spacing } from '../theme/tokens';
+ import { AlertText } from './AlertText';
+ import { Button } from './Button';
+ import { Card } from './Card';
+@@ -260,6 +262,38 @@ describe('OfflineBanner', () => {
+     });
+     expect(screen.queryByText(/You are offline/)).toBeNull();
+   });
++
++  it("takes the status bar's place while offline, the screens below it getting no top inset", async () => {
++    const tops: number[] = [];
++    let mounts = 0;
++    function Below() {
++      tops.push(useSafeAreaInsets().top);
++      // Mounted once: the screens below keep their state online and offline.
++      useEffect(() => {
++        mounts += 1;
++      }, []);
++      return <Text>Below</Text>;
++    }
++    await renderWithProviders(
++      <SafeAreaInsetsContext.Provider value={{ top: 24, right: 0, bottom: 16, left: 0 }}>
++        <OfflineBanner>
++          <Below />
++        </OfflineBanner>
++      </SafeAreaInsetsContext.Provider>,
++    );
++    expect(tops.at(-1)).toBe(24);
++    await act(() => {
++      onlineManager.setOnline(false);
++    });
++    expect(screen.getByTestId('offline-banner')).toHaveStyle({ paddingTop: 24 + spacing.sm });
++    expect(tops.at(-1)).toBe(0);
++    await act(() => {
++      onlineManager.setOnline(true);
++    });
++    expect(screen.queryByTestId('offline-banner')).toBeNull();
++    expect(tops.at(-1)).toBe(24);
++    expect(mounts).toBe(1);
++  });
+ });
+ 
+ describe('theme', () => {

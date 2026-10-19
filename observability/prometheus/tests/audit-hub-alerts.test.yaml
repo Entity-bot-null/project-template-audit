@@ -1,0 +1,420 @@
+# Unit tests of audit-hub-alerts.yaml with synthetic series: `pnpm observability:check`
+# runs them with promtool (docs/observability.md#dashboards-and-alerts-as-code).
+rule_files:
+  - ../rules/audit-hub-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # The heartbeat age keeps growing: no heartbeat since minute 0.
+  - name: an application that stops sending heartbeats warns
+    interval: 1m
+    input_series:
+      - series: 'app_connected_app_heartbeat_age_seconds{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AuditHubAppSilent
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AuditHubAppSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+              connected_app: billing
+            exp_annotations:
+              summary: 'billing stopped sending heartbeats (api, production)'
+              description: 'No heartbeat from billing for 12m 0s: the application is down, cannot reach Audit Hub, or its connector is off. Its events wait in its queue.'
+              runbook_url: docs/incident-response.md#17-connected-application-silent-or-behind
+              dashboard_uid: audit-ingest
+
+  - name: regular heartbeats do not warn
+    interval: 1m
+    input_series:
+      - series: 'app_connected_app_heartbeat_age_seconds{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing"}'
+        values: '30x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AuditHubAppSilent
+        exp_alerts: []
+
+  - name: events waiting in a connector queue warn
+    interval: 1m
+    input_series:
+      - series: 'app_connected_app_queue_oldest_age_seconds{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AuditHubConnectorBacklog
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AuditHubConnectorBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+              connected_app: billing
+            exp_annotations:
+              summary: 'Events of billing wait in its connector queue (api, production)'
+              description: 'The oldest event waiting in the connector of billing is 30m 0s old, for more than 10 minutes: Audit Hub refuses its requests, limits them, or the application cannot reach it.'
+              runbook_url: docs/incident-response.md#17-connected-application-silent-or-behind
+              dashboard_uid: audit-ingest
+
+  - name: missing sequence numbers warn, and stop when they arrive
+    interval: 1m
+    input_series:
+      - series: 'app_ingest_sequence_gap_events{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing"}'
+        values: '0x5 3x10 0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: AuditHubSequenceGap
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: AuditHubSequenceGap
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+              connected_app: billing
+            exp_annotations:
+              summary: 'Events of billing are missing (api, production)'
+              description: '3 sequence numbers of billing never arrived: events lost or suppressed at the origin, or its sequence restarted (a restore). Its audit trail has a hole until they arrive.'
+              runbook_url: docs/incident-response.md#18-events-missing-from-a-connected-application
+              dashboard_uid: audit-ingest
+      - eval_time: 25m
+        alertname: AuditHubSequenceGap
+        exp_alerts: []
+
+  # 10 events a minute, 2 of them refused (20 %).
+  - name: many refused events warn
+    interval: 1m
+    input_series:
+      - series: 'app_ingest_events_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing", outcome="accepted", reason="none"}'
+        values: '0+8x40'
+      - series: 'app_ingest_events_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing", outcome="rejected", reason="action_unknown"}'
+        values: '0+2x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AuditHubIngestRejections
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: AuditHubIngestRejections
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+              connected_app: billing
+            exp_annotations:
+              summary: 'Audit Hub refuses events of billing (api, production)'
+              description: '20% of the events of billing are refused, for 15 minutes: its catalog or its connector is out of step with what it records.'
+              runbook_url: docs/incident-response.md#19-ingestion-refusing-events-or-signatures
+              dashboard_uid: audit-ingest
+
+  # A catalog not published yet is retried by the connector: not counted.
+  - name: events waiting for their catalog do not warn
+    interval: 1m
+    input_series:
+      - series: 'app_ingest_events_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing", outcome="accepted", reason="none"}'
+        values: '0+8x40'
+      - series: 'app_ingest_events_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing", outcome="rejected", reason="catalog_version_unknown"}'
+        values: '0+5x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: AuditHubIngestRejections
+        exp_alerts: []
+
+  - name: refused signatures warn
+    interval: 1m
+    input_series:
+      - series: 'app_ingest_requests_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="unknown", endpoint="events", outcome="unauthorized"}'
+        values: '0+6x30'
+      - series: 'app_ingest_requests_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing", endpoint="events", outcome="ok"}'
+        values: '0+30x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AuditHubSignatureFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+              connected_app: unknown
+            exp_annotations:
+              summary: 'Signed requests refused for unknown (api, production)'
+              description: '0.10 signed requests a second refused for 10 minutes (unknown): a wrong or revoked key, a skewed clock, or requests replayed or forged.'
+              runbook_url: docs/incident-response.md#19-ingestion-refusing-events-or-signatures
+              dashboard_uid: audit-ingest
+
+  # Integrity (the audit-hub-integrity group).
+  - name: one failed integrity verification pages
+    interval: 1m
+    input_series:
+      - series: 'app_integrity_checks_total{job="api", deployment_environment_name="production", instance="i-1", outcome="failed"}'
+        values: '0x30 1x60'
+      - series: 'app_integrity_checks_total{job="api", deployment_environment_name="production", instance="i-1", outcome="passed"}'
+        values: '0+1x90'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AuditHubIntegrityCheckFailed
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AuditHubIntegrityCheckFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'The audit log failed its integrity verification (api, production)'
+              description: 'A verification in the last 24 hours found records that no longer match their seals: events or seals changed, added or deleted outside retention and erasure. `audit status` and the "Integrity verification … FAILED" error of the log name them by id.'
+              runbook_url: docs/incident-response.md#20-audit-log-integrity-verification-failed
+              dashboard_uid: audit-integrity
+
+  - name: events left unsealed warn
+    interval: 1m
+    input_series:
+      - series: 'app_integrity_unsealed_age_seconds{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing"}'
+        values: '60+60x40'
+      - series: 'app_integrity_unsealed_age_seconds{job="api", deployment_environment_name="production", instance="i-1", connected_app="crm"}'
+        values: '150x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AuditHubSealingStalled
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AuditHubSealingStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+              connected_app: billing
+            exp_annotations:
+              summary: 'Events of billing are not being sealed (api, production)'
+              description: 'The oldest event of billing without a seal is 31m 0s old, for 10 minutes: the sealer stopped (database errors, its timers), and these records are not protected by a seal yet.'
+              runbook_url: docs/incident-response.md#21-audit-log-sealing-stalled
+              dashboard_uid: audit-integrity
+
+  # Last successes as Unix seconds; promtool's clock starts at 0. One sample
+  # a minute, as the gauge is exported (an hourly one goes stale between
+  # samples). The verification last succeeded at 0; retention keeps
+  # succeeding.
+  - name: a daily job without a success for a day warns
+    interval: 1m
+    input_series:
+      - series: 'app_job_last_success_timestamp_seconds{job="api", deployment_environment_name="production", instance="i-1", job_name="integrity_verify"}'
+        values: '0x1700'
+      - series: 'app_job_last_success_timestamp_seconds{job="api", deployment_environment_name="production", instance="i-1", job_name="retention"}'
+        values: '0+60x1700'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: AuditHubIntegrityCheckMissing
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: AuditHubIntegrityCheckMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'The daily integrity verification has not succeeded for a day (api, production)'
+              description: 'No successful integrity verification for 1d 3h 0m 0s: nobody checks the seals meanwhile. The "Job integrity_verify failed" error of the log says why.'
+              runbook_url: docs/incident-response.md#22-a-daily-audit-job-stopped-running
+              dashboard_uid: audit-integrity
+      - eval_time: 27h
+        alertname: AuditHubRetentionSweepMissing
+        exp_alerts: []
+
+  - name: a retention sweep without a success for a day warns
+    interval: 1m
+    input_series:
+      - series: 'app_job_last_success_timestamp_seconds{job="api", deployment_environment_name="production", instance="i-1", job_name="retention"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: AuditHubRetentionSweepMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'The daily retention sweep has not succeeded for a day (api, production)'
+              description: 'No successful retention sweep for 1d 3h 0m 0s: records, personal data and coordinates stay past their retention periods (the privacy notice promises otherwise). The "Job retention failed" error of the log says why.'
+              runbook_url: docs/incident-response.md#22-a-daily-audit-job-stopped-running
+              dashboard_uid: audit-integrity
+
+  - name: a database role that can change audit records pages
+    interval: 1m
+    input_series:
+      - series: 'app_database_privileges_ok{job="api", deployment_environment_name="production", instance="i-1"}'
+        values: '1x10 0x20'
+      - series: 'app_database_privileges_ok{job="api", deployment_environment_name="production", instance="i-2"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AuditHubDatabasePrivilegesTooBroad
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AuditHubDatabasePrivilegesTooBroad
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: api
+              deployment_environment_name: production
+              instance: i-1
+            exp_annotations:
+              summary: "API instance i-1's database role can change audit records (api, production)"
+              description: "The API's database role has UPDATE or DELETE on the append-only tables: it runs as the tables' owner, or a GRANT gave the rights back without audit_apply_runtime_privileges()."
+              runbook_url: docs/incident-response.md#23-database-role-can-change-audit-records
+              dashboard_uid: audit-integrity
+
+  # Detection (the audit-hub-detection group).
+  - name: failing webhooks to an application warn
+    interval: 1m
+    input_series:
+      - series: 'app_webhook_deliveries_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing", target="app", outcome="retry"}'
+        values: '0x10 1x5 2x5 3x5 4x10'
+      - series: 'app_webhook_deliveries_total{job="api", deployment_environment_name="production", instance="i-1", connected_app="billing", target="app", outcome="delivered"}'
+        values: '0+5x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AuditHubWebhooksFailing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AuditHubWebhooksFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+              connected_app: billing
+              target: app
+            exp_annotations:
+              summary: 'Webhooks to billing (app) are failing (api, production)'
+              description: '4 webhook attempts to billing (app) failed in 30 minutes: its route is down, refuses the signature (a webhook secret out of step), or cannot be reached. Alerts, "Was it you?" prompts and response actions wait or are lost.'
+              runbook_url: docs/incident-response.md#24-webhooks-failing-or-backed-up
+              dashboard_uid: audit-apps
+
+  - name: webhooks waiting in the outbox warn
+    interval: 1m
+    input_series:
+      - series: 'app_webhook_outbox_oldest_age_seconds{job="api", deployment_environment_name="production", instance="i-1"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AuditHubWebhookBacklog
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AuditHubWebhookBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'Webhooks wait in the outbox (api, production)'
+              description: 'The oldest webhook still to send is 30m 0s old, for 10 minutes: deliveries are retried, or no worker sends them.'
+              runbook_url: docs/incident-response.md#24-webhooks-failing-or-backed-up
+              dashboard_uid: audit-apps
+
+  - name: high security alerts left open warn
+    interval: 1m
+    input_series:
+      - series: 'app_alerts_open{job="api", deployment_environment_name="production", instance="i-1", severity="high"}'
+        values: '0x10 1x90'
+      - series: 'app_alerts_open{job="api", deployment_environment_name="production", instance="i-2", severity="high"}'
+        values: '0x10 1x90'
+      - series: 'app_alerts_open{job="api", deployment_environment_name="production", instance="i-1", severity="medium"}'
+        values: '5x100'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: AuditHubSecurityAlertsUnattended
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: AuditHubSecurityAlertsUnattended
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'High or critical security alerts are open (api, production)'
+              description: '1 high or critical security alert(s) open or in review for more than an hour: an account may be under attack. Work on them in the alerts page.'
+              runbook_url: docs/incident-response.md#25-security-alerts-unattended
+              dashboard_uid: audit-apps
+
+  - name: real-time rules far behind warn
+    interval: 1m
+    input_series:
+      - series: 'app_rules_cursor_lag_seconds{job="api", deployment_environment_name="production", instance="i-1"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AuditHubRulesBehind
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: AuditHubRulesBehind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'The real-time detection rules are behind (api, production)'
+              description: 'The oldest event the real-time rules have not read is 25m 0s old, for 10 minutes: suspicious sign-ins, erasures and response action outcomes are handled late.'
+              runbook_url: docs/incident-response.md#26-detection-rules-behind
+              dashboard_uid: audit-apps
+
+  # Unix seconds; promtool's clock starts at 0.
+  - name: periodic rules that stopped warn
+    interval: 1m
+    input_series:
+      - series: 'app_job_last_success_timestamp_seconds{job="api", deployment_environment_name="production", instance="i-1", job_name="rules_periodic"}'
+        values: '0x60'
+      - series: 'app_job_last_success_timestamp_seconds{job="api", deployment_environment_name="production", instance="i-1", job_name="retention"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: AuditHubPeriodicRulesMissing
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: AuditHubPeriodicRulesMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'The periodic detection rules stopped running (api, production)'
+              description: 'No successful run of the periodic rules for 45m 0s: brute force, credential stuffing, bulk exports and token reuse go unnoticed.'
+              runbook_url: docs/incident-response.md#26-detection-rules-behind
+              dashboard_uid: audit-apps
+
+  - name: an old geolocation database warns
+    interval: 1m
+    input_series:
+      - series: 'app_geoip_database_age_days{job="api", deployment_environment_name="production", instance="i-1"}'
+        values: '44x10 50x100'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AuditHubGeoIpDatabaseStale
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: AuditHubGeoIpDatabaseStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: api
+              deployment_environment_name: production
+            exp_annotations:
+              summary: 'The IP geolocation database is old (api, production)'
+              description: "The loaded IP geolocation database was built 50 days ago: new country and travel signals grow less reliable. Download this month's files and restart."
+              runbook_url: docs/incident-response.md#27-ip-geolocation-database-stale
+              dashboard_uid: audit-apps

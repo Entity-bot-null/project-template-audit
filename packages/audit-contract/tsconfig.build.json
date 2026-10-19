@@ -1,0 +1,17 @@
+{
+  // The compiled package the API imports (exports in package.json). The
+  // contract itself runs on Node.js, in browsers and in React Native: only
+  // src/node/ may use Node.js modules.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "declaration": true,
+    "sourceMap": true,
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.spec.ts", "src/testing"]
+}

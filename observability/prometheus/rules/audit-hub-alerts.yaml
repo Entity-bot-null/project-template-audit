@@ -1,0 +1,262 @@
+# Audit Hub alerts (docs/alerting.md#alert-catalog): what connected
+# applications send, and what Audit Hub does with it. Every series of a
+# connected application carries connected_app (its slug): the alerts group by
+# it, so one silent application never hides behind the others. Severity,
+# runbook and dashboard as in api-alerts.yaml; thresholds are starting points.
+groups:
+  - name: audit-hub-ingestion
+    rules:
+      # Every connector sends a heartbeat a minute. Silence means the
+      # application is down, cannot reach Audit Hub, or its connector is off;
+      # its events wait in its queue (nothing is lost while the queue holds).
+      - alert: AuditHubAppSilent
+        expr: |
+          max by (job, deployment_environment_name, connected_app) (app_connected_app_heartbeat_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.connected_app }} stopped sending heartbeats ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'No heartbeat from {{ $labels.connected_app }} for {{ $value | humanizeDuration }}: the application is down, cannot reach Audit Hub, or its connector is off. Its events wait in its queue.'
+          runbook_url: docs/incident-response.md#17-connected-application-silent-or-behind
+          dashboard_uid: audit-ingest
+
+      # The connector reports its queue: events that wait are events Audit
+      # Hub does not see yet (alerts and integrity come later for them).
+      - alert: AuditHubConnectorBacklog
+        expr: |
+          max by (job, deployment_environment_name, connected_app) (app_connected_app_queue_oldest_age_seconds) > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Events of {{ $labels.connected_app }} wait in its connector queue ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'The oldest event waiting in the connector of {{ $labels.connected_app }} is {{ $value | humanizeDuration }} old, for more than 10 minutes: Audit Hub refuses its requests, limits them, or the application cannot reach it.'
+          runbook_url: docs/incident-response.md#17-connected-application-silent-or-behind
+          dashboard_uid: audit-ingest
+
+      # Sequence numbers missing for longer than the grace period (10
+      # minutes): events lost or suppressed at the origin. Every refused or
+      # duplicate event consumes its number, so a gap is never a refusal.
+      - alert: AuditHubSequenceGap
+        expr: |
+          max by (job, deployment_environment_name, connected_app) (app_ingest_sequence_gap_events) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Events of {{ $labels.connected_app }} are missing ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: '{{ $value }} sequence numbers of {{ $labels.connected_app }} never arrived: events lost or suppressed at the origin, or its sequence restarted (a restore). Its audit trail has a hole until they arrive.'
+          runbook_url: docs/incident-response.md#18-events-missing-from-a-connected-application
+          dashboard_uid: audit-ingest
+
+      # Refused events are answered with their reason and kept in
+      # ingest_exceptions; many of them mean a connector or a catalog out of
+      # step. A catalog not published yet is retried by the connector and is
+      # left out. The second condition skips applications that send almost
+      # nothing (one refusal would be most of their traffic).
+      - alert: AuditHubIngestRejections
+        expr: |
+          (
+            sum by (job, deployment_environment_name, connected_app) (
+              rate(app_ingest_events_total{outcome="rejected", reason!="catalog_version_unknown"}[15m])
+            )
+            / sum by (job, deployment_environment_name, connected_app) (rate(app_ingest_events_total[15m]))
+          ) > 0.05
+          and sum by (job, deployment_environment_name, connected_app) (rate(app_ingest_events_total[15m])) > 0.01
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Audit Hub refuses events of {{ $labels.connected_app }} ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: '{{ $value | humanizePercentage }} of the events of {{ $labels.connected_app }} are refused, for 15 minutes: its catalog or its connector is out of step with what it records.'
+          runbook_url: docs/incident-response.md#19-ingestion-refusing-events-or-signatures
+          dashboard_uid: audit-ingest
+
+      # Signed requests refused: a wrong or rotated key, a skewed clock, or
+      # someone replaying or forging requests. connected_app is unknown when
+      # the key itself was not recognized.
+      - alert: AuditHubSignatureFailures
+        expr: |
+          sum by (job, deployment_environment_name, connected_app) (
+            rate(app_ingest_requests_total{outcome=~"unauthorized|replayed|timestamp_skew"}[10m])
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Signed requests refused for {{ $labels.connected_app }} ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: '{{ $value | printf "%.2f" }} signed requests a second refused for 10 minutes ({{ $labels.connected_app }}): a wrong or revoked key, a skewed clock, or requests replayed or forged.'
+          runbook_url: docs/incident-response.md#19-ingestion-refusing-events-or-signatures
+          dashboard_uid: audit-ingest
+
+  - name: audit-hub-integrity
+    rules:
+      # A verification found the audit log changed outside retention and
+      # erasure: an event, a seal or a signature no longer matches
+      # (docs/adr/0008). The log may have been tampered with. One failed run
+      # is enough; the alert stays for a day after it (the window), and the
+      # run, with the ids of what failed, is in integrity_verifications.
+      - alert: AuditHubIntegrityCheckFailed
+        expr: |
+          sum by (job, deployment_environment_name) (
+            increase(app_integrity_checks_total{outcome="failed"}[1d])
+          ) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The audit log failed its integrity verification ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'A verification in the last 24 hours found records that no longer match their seals: events or seals changed, added or deleted outside retention and erasure. `audit status` and the "Integrity verification … FAILED" error of the log name them by id.'
+          runbook_url: docs/incident-response.md#20-audit-log-integrity-verification-failed
+          dashboard_uid: audit-integrity
+
+      # The sealer runs every minute and seals windows 2 minutes old: events
+      # waiting much longer mean sealing stopped, and new records are not
+      # protected by a seal yet.
+      - alert: AuditHubSealingStalled
+        expr: |
+          max by (job, deployment_environment_name, connected_app) (app_integrity_unsealed_age_seconds) > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Events of {{ $labels.connected_app }} are not being sealed ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'The oldest event of {{ $labels.connected_app }} without a seal is {{ $value | humanizeDuration }} old, for 10 minutes: the sealer stopped (database errors, its timers), and these records are not protected by a seal yet.'
+          runbook_url: docs/incident-response.md#21-audit-log-sealing-stalled
+          dashboard_uid: audit-integrity
+
+      # The daily jobs run when a day has passed since their last success,
+      # checked every hour: 26 hours leaves room for the check and a long
+      # run. A job that never succeeded reads 0 and fires too.
+      - alert: AuditHubIntegrityCheckMissing
+        expr: |
+          time() - max by (job, deployment_environment_name) (
+            app_job_last_success_timestamp_seconds{job_name="integrity_verify"}
+          ) > 26 * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The daily integrity verification has not succeeded for a day ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'No successful integrity verification for {{ $value | humanizeDuration }}: nobody checks the seals meanwhile. The "Job integrity_verify failed" error of the log says why.'
+          runbook_url: docs/incident-response.md#22-a-daily-audit-job-stopped-running
+          dashboard_uid: audit-integrity
+
+      - alert: AuditHubRetentionSweepMissing
+        expr: |
+          time() - max by (job, deployment_environment_name) (
+            app_job_last_success_timestamp_seconds{job_name="retention"}
+          ) > 26 * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The daily retention sweep has not succeeded for a day ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'No successful retention sweep for {{ $value | humanizeDuration }}: records, personal data and coordinates stay past their retention periods (the privacy notice promises otherwise). The "Job retention failed" error of the log says why.'
+          runbook_url: docs/incident-response.md#22-a-daily-audit-job-stopped-running
+          dashboard_uid: audit-integrity
+
+      # The API's own database role can update or delete audit records: the
+      # triggers still refuse it, but the first wall is down (docs/adr/0007).
+      - alert: AuditHubDatabasePrivilegesTooBroad
+        expr: |
+          min by (job, deployment_environment_name, instance) (app_database_privileges_ok) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API instance {{ $labels.instance }}'s database role can change audit records ({{ $labels.job }}, {{ $labels.deployment_environment_name }})"
+          description: "The API's database role has UPDATE or DELETE on the append-only tables: it runs as the tables' owner, or a GRANT gave the rights back without audit_apply_runtime_privileges()."
+          runbook_url: docs/incident-response.md#23-database-role-can-change-audit-records
+          dashboard_uid: audit-integrity
+
+  - name: audit-hub-detection
+    rules:
+      # Webhooks the application did not take: retried, given up on (a 401
+      # is a secret mismatch, given up on at once), dropped. Three or more in
+      # 30 minutes: the application's webhook route is down or misconfigured,
+      # and its "Was it you?" prompts and response actions are not reaching it.
+      - alert: AuditHubWebhooksFailing
+        expr: |
+          sum by (job, deployment_environment_name, connected_app, target) (
+            increase(app_webhook_deliveries_total{outcome!="delivered"}[30m])
+          ) > 2
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Webhooks to {{ $labels.connected_app }} ({{ $labels.target }}) are failing ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: '{{ $value | printf "%.0f" }} webhook attempts to {{ $labels.connected_app }} ({{ $labels.target }}) failed in 30 minutes: its route is down, refuses the signature (a webhook secret out of step), or cannot be reached. Alerts, "Was it you?" prompts and response actions wait or are lost.'
+          runbook_url: docs/incident-response.md#24-webhooks-failing-or-backed-up
+          dashboard_uid: audit-apps
+
+      # Deliveries waiting: the worker stopped, or every attempt is retried.
+      - alert: AuditHubWebhookBacklog
+        expr: |
+          max by (job, deployment_environment_name) (app_webhook_outbox_oldest_age_seconds) > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Webhooks wait in the outbox ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'The oldest webhook still to send is {{ $value | humanizeDuration }} old, for 10 minutes: deliveries are retried, or no worker sends them.'
+          runbook_url: docs/incident-response.md#24-webhooks-failing-or-backed-up
+          dashboard_uid: audit-apps
+
+      # High and critical security alerts nobody closed: someone must look at
+      # them (they also went out by email and to the chat channels).
+      - alert: AuditHubSecurityAlertsUnattended
+        expr: |
+          sum by (job, deployment_environment_name) (
+            max by (job, deployment_environment_name, severity) (app_alerts_open{severity=~"high|critical"})
+          ) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: 'High or critical security alerts are open ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: '{{ $value }} high or critical security alert(s) open or in review for more than an hour: an account may be under attack. Work on them in the alerts page.'
+          runbook_url: docs/incident-response.md#25-security-alerts-unattended
+          dashboard_uid: audit-apps
+
+      # The real-time rules read events behind a cursor: far behind means
+      # new devices, travel and erasures are handled late.
+      - alert: AuditHubRulesBehind
+        expr: |
+          max by (job, deployment_environment_name) (app_rules_cursor_lag_seconds) > 600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The real-time detection rules are behind ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'The oldest event the real-time rules have not read is {{ $value | humanizeDuration }} old, for 10 minutes: suspicious sign-ins, erasures and response action outcomes are handled late.'
+          runbook_url: docs/incident-response.md#26-detection-rules-behind
+          dashboard_uid: audit-apps
+
+      # The periodic rules run every 5 minutes; a job that never succeeded reads 0.
+      - alert: AuditHubPeriodicRulesMissing
+        expr: |
+          time() - max by (job, deployment_environment_name) (
+            app_job_last_success_timestamp_seconds{job_name="rules_periodic"}
+          ) > 1800
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The periodic detection rules stopped running ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'No successful run of the periodic rules for {{ $value | humanizeDuration }}: brute force, credential stuffing, bulk exports and token reuse go unnoticed.'
+          runbook_url: docs/incident-response.md#26-detection-rules-behind
+          dashboard_uid: audit-apps
+
+      # The geolocation database is replaced by hand every month (DB-IP Lite
+      # is monthly); an old one places addresses wrongly.
+      - alert: AuditHubGeoIpDatabaseStale
+        expr: |
+          max by (job, deployment_environment_name) (app_geoip_database_age_days) > 45
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The IP geolocation database is old ({{ $labels.job }}, {{ $labels.deployment_environment_name }})'
+          description: 'The loaded IP geolocation database was built {{ $value | printf "%.0f" }} days ago: new country and travel signals grow less reliable. Download this month''s files and restart.'
+          runbook_url: docs/incident-response.md#27-ip-geolocation-database-stale
+          dashboard_uid: audit-apps

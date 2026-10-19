@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  // As in the app it is installed into (expo/tsconfig.base): bundler
+  // resolution, so imports carry no extension. The app's own strict flags
+  // apply too.
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["vitest/globals", "node"]
+  },
+  "include": ["src", "*.ts"]
+}

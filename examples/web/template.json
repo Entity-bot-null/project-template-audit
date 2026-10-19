@@ -1,0 +1,16 @@
+{
+  "$comment": "The template the web example is generated from (docs/adr/0010): bump the commit in a pull request that shows the template's diff. Its connectors: the API's at its root, the SPA's in apps/web.",
+  "repository": "https://github.com/Entity-bot-null/project-template-web",
+  "commit": "8d52b7b3648f97623c091c5607c13a2409f23bd6",
+  "connector": "api",
+  "connectors": [
+    {
+      "kind": "api",
+      "path": ""
+    },
+    {
+      "kind": "spa",
+      "path": "apps/web"
+    }
+  ]
+}

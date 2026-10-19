@@ -1,0 +1,25 @@
+{
+  "name": "audit-expo",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Audit Hub connector for an app created from project-template-app: the device's own events, queued offline per user and sent through the app's API, the account's security (activity, \"Was it you?\") and the phone's push token. Installed as source (docs/adr/0009).",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.104.1",
+    "audit-contract": "workspace:*",
+    "react": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@types/react": "^19.3.0",
+    "@vitest/coverage-v8": "^5.0.3",
+    "typescript": "~6.0.3",
+    "vitest": "^5.0.3"
+  }
+}

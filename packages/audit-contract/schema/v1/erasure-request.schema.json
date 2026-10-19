@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "scope": {
+      "default": "personal",
+      "type": "string",
+      "enum": [
+        "personal",
+        "events"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$id": "https://audit-hub.invalid/schema/v1/erasure-request.schema.json",
+  "title": "ErasureRequest"
+}

@@ -1,0 +1,1428 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 17:28:22 -0600
+Subject: [PATCH 07/10] feat(users): let admins disable and enable accounts
+
+An account that must stop signing in (someone who left, a suspected
+compromise) could only be deleted, or locked by hand in the database.
+
+PATCH /api/users/:id now also takes `disabled`. Disabling sets
+users.disabled_at (a nullable column: an expand step), ends every
+session and raises the securityVersion in one transaction, so the
+person is signed out everywhere at once. While it is set, sign-in
+answers exactly as for a wrong password (SessionsService.create refuses
+it, whichever flow signs in), refresh and the access-token guard refuse
+it too (also when the column was set by hand), and password recovery
+sends nothing and refuses a link sent before. Nobody disables their own
+account; the last admin who may sign in cannot be disabled or demoted.
+
+The account's page shows its status and disables it after a
+confirmation, or enables it again; the list of users has a status
+column.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../migration.sql                             |   2 +
+ apps/api/prisma/schema.prisma                 |  18 +--
+ apps/api/src/auth/jwt-auth.guard.spec.ts      |  21 +++-
+ apps/api/src/auth/jwt-auth.guard.ts           |   6 +-
+ apps/api/src/auth/password-reset.int.spec.ts  |  16 +++
+ .../src/auth/password-reset.service.spec.ts   |  26 ++++-
+ apps/api/src/auth/password-reset.service.ts   |  10 +-
+ apps/api/src/auth/sessions.service.spec.ts    |  36 +++++-
+ apps/api/src/auth/sessions.service.ts         |  20 +++-
+ apps/api/src/users/dto/user.schemas.ts        |  11 +-
+ apps/api/src/users/user-changes.int.spec.ts   |  52 ++++++++-
+ apps/api/src/users/users.controller.ts        |   4 +-
+ apps/api/src/users/users.service.spec.ts      |  87 ++++++++++++---
+ apps/api/src/users/users.service.ts           |  77 +++++++++----
+ apps/web/performance-budget.json              |   4 +-
+ apps/web/src/api/schema.d.ts                  |  15 ++-
+ apps/web/src/pages/AdminUserPage.spec.tsx     |  66 ++++++++++-
+ apps/web/src/pages/AdminUserPage.tsx          | 103 ++++++++++++++++--
+ apps/web/src/pages/AdminUsersPage.spec.tsx    |   9 +-
+ apps/web/src/pages/AdminUsersPage.tsx         |   2 +
+ docs/manual.es.md                             |  12 +-
+ docs/manual.md                                |  11 +-
+ docs/security.md                              |  29 ++++-
+ e2e/users.e2e.ts                              |  34 ++++++
+ openapi/openapi.json                          |  34 +++++-
+ 25 files changed, 601 insertions(+), 104 deletions(-)
+ create mode 100644 apps/api/prisma/migrations/20261017231843_add_account_disabling/migration.sql
+
+diff --git a/apps/api/prisma/migrations/20261017231843_add_account_disabling/migration.sql b/apps/api/prisma/migrations/20261017231843_add_account_disabling/migration.sql
+new file mode 100644
+index 0000000..17893f9
+--- /dev/null
++++ b/apps/api/prisma/migrations/20261017231843_add_account_disabling/migration.sql
+@@ -0,0 +1,2 @@
++-- AlterTable
++ALTER TABLE "users" ADD COLUMN     "disabled_at" TIMESTAMPTZ(3);
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 3e1094f..543da7b 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -22,19 +22,23 @@ enum Role {
+ }
+ 
+ model User {
+-  id              String   @id @default(uuid(7)) @db.Uuid
++  id              String    @id @default(uuid(7)) @db.Uuid
+   // Stored trimmed and lowercased (normalizeEmail) so the unique index is
+   // case-insensitive in practice.
+-  email           String   @unique
++  email           String    @unique
+   name            String
+-  passwordHash    String   @map("password_hash")
+-  role            Role     @default(member)
++  passwordHash    String    @map("password_hash")
++  role            Role      @default(member)
+   // Raised by every change that must end what was granted before it (a new
+   // password): access tokens carry it (claim sv) and are refused once it moved
+   // on, and one-time tokens minted under an older value no longer work.
+-  securityVersion Int      @default(0) @map("security_version")
+-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
++  securityVersion Int       @default(0) @map("security_version")
++  // Set by an admin (PATCH /api/users/:id): while set, sign-in, refresh and
++  // every access token are refused, as for a wrong password; disabling ends
++  // every session and raises securityVersion in the same transaction.
++  disabledAt      DateTime? @map("disabled_at") @db.Timestamptz(3)
++  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
++  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+ 
+   sessions        Session[]
+   mailMessages    MailMessage[]
+diff --git a/apps/api/src/auth/jwt-auth.guard.spec.ts b/apps/api/src/auth/jwt-auth.guard.spec.ts
+index db1f64e..8f23e7f 100644
+--- a/apps/api/src/auth/jwt-auth.guard.spec.ts
++++ b/apps/api/src/auth/jwt-auth.guard.spec.ts
+@@ -17,8 +17,10 @@ const signer = (secret: string) =>
+   new JwtService({ secret, signOptions: { algorithm: 'HS256', expiresIn: 60 } });
+ const jwt = signer(env.JWT_ACCESS_SECRET);
+ 
+-// The account as the database has it now: its securityVersion, or gone.
+-const account = { current: { securityVersion: 0 } as { securityVersion: number } | null };
++// The account as the database has it now: its securityVersion and whether
++// it is disabled, or gone.
++type Account = { securityVersion: number; disabledAt: Date | null } | null;
++const account = { current: { securityVersion: 0, disabledAt: null } as Account };
+ const findUnique = vi.fn(() => Promise.resolve(account.current));
+ const prisma = { user: { findUnique } } as unknown as PrismaService;
+ const guard = new JwtAuthGuard(jwt, prisma);
+@@ -35,7 +37,7 @@ function contextWith(authorization?: string) {
+ 
+ afterEach(() => {
+   env.JWT_ACCESS_SECRET_PREVIOUS = undefined;
+-  account.current = { securityVersion: 0 };
++  account.current = { securityVersion: 0, disabledAt: null };
+ });
+ 
+ describe('JwtAuthGuard', () => {
+@@ -98,16 +100,25 @@ describe('JwtAuthGuard', () => {
+   it("refuses a token minted before the account's last credential change, at once", async () => {
+     const token = await jwt.signAsync({ sub: USER_ID, role: 'member', sv: 0 });
+     // A new password raised the account's securityVersion.
+-    account.current = { securityVersion: 1 };
++    account.current = { securityVersion: 1, disabledAt: null };
+     await expect(guard.canActivate(contextWith(`Bearer ${token}`).context)).rejects.toThrow(
+       'Invalid or expired access token',
+     );
+     expect(findUnique).toHaveBeenLastCalledWith({
+       where: { id: USER_ID },
+-      select: { securityVersion: true },
++      select: { securityVersion: true, disabledAt: true },
+     });
+   });
+ 
++  it('refuses the token of a disabled account, even one disabled by hand', async () => {
++    const token = await jwt.signAsync({ sub: USER_ID, role: 'member', sv: 0 });
++    // Set straight in the database: the securityVersion did not move.
++    account.current = { securityVersion: 0, disabledAt: new Date() };
++    await expect(guard.canActivate(contextWith(`Bearer ${token}`).context)).rejects.toThrow(
++      'Invalid or expired access token',
++    );
++  });
++
+   it('refuses the token of an account that no longer exists', async () => {
+     const token = await jwt.signAsync({ sub: USER_ID, role: 'member', sv: 0 });
+     account.current = null;
+diff --git a/apps/api/src/auth/jwt-auth.guard.ts b/apps/api/src/auth/jwt-auth.guard.ts
+index 2ab9b74..757a79e 100644
+--- a/apps/api/src/auth/jwt-auth.guard.ts
++++ b/apps/api/src/auth/jwt-auth.guard.ts
+@@ -39,9 +39,11 @@ export class JwtAuthGuard implements CanActivate {
+ 
+     const account = await this.prisma.user.findUnique({
+       where: { id: payload.data.sub },
+-      select: { securityVersion: true },
++      select: { securityVersion: true, disabledAt: true },
+     });
+-    if (account?.securityVersion !== payload.data.sv) {
++    // Disabling raises the securityVersion; the date also covers an account
++    // disabled by hand.
++    if (account?.securityVersion !== payload.data.sv || account.disabledAt !== null) {
+       throw new UnauthorizedException('Invalid or expired access token');
+     }
+ 
+diff --git a/apps/api/src/auth/password-reset.int.spec.ts b/apps/api/src/auth/password-reset.int.spec.ts
+index 609c50b..4caae34 100644
+--- a/apps/api/src/auth/password-reset.int.spec.ts
++++ b/apps/api/src/auth/password-reset.int.spec.ts
+@@ -135,6 +135,22 @@ describe.skipIf(skipWithoutMailpit)('password reset (PostgreSQL + Mailpit)', ()
+     expect(queued).toEqual([{ kind: 'password_reset', userId: ada.id }]);
+   });
+ 
++  it('sends a disabled account no link, and refuses a link it got before', async () => {
++    const ada = await user('Ada');
++    const token = await linkFor(ada.email);
++    await t.prisma.mailMessage.deleteMany();
++    await t.prisma.user.update({ where: { id: ada.id }, data: { disabledAt: new Date() } });
++
++    await request(t.server)
++      .post('/api/auth/password-resets')
++      .send({ email: ada.email })
++      .expect(204);
++    await t.resets.settled();
++    await expect(t.prisma.mailMessage.count()).resolves.toBe(0);
++    // Disabled by hand here (an admin's change also moves the securityVersion).
++    await confirm(token).expect(404);
++  });
++
+   it('refuses a weak password without spending the link', async () => {
+     const ada = await user('Adeline');
+     const token = await linkFor(ada.email);
+diff --git a/apps/api/src/auth/password-reset.service.spec.ts b/apps/api/src/auth/password-reset.service.spec.ts
+index 1bf42be..cf6e6d6 100644
+--- a/apps/api/src/auth/password-reset.service.spec.ts
++++ b/apps/api/src/auth/password-reset.service.spec.ts
+@@ -14,7 +14,13 @@ import { INVALID_RESET_LINK, PasswordResetService } from './password-reset.servi
+ // The transaction's SQL, locks and concurrency run against PostgreSQL in
+ // password-reset.int.spec.ts; here, the order of the decisions.
+ 
+-const USER = { id: 'u1', email: 'ada@example.test', name: 'Ada Lovelace', securityVersion: 2 };
++const USER = {
++  id: 'u1',
++  email: 'ada@example.test',
++  name: 'Ada Lovelace',
++  securityVersion: 2,
++  disabledAt: null as Date | null,
++};
+ const TOKEN = 'a'.repeat(43);
+ const GOOD = 'violet harbour lantern 7';
+ 
+@@ -115,7 +121,7 @@ describe('PasswordResetService.request', () => {
+     await service.settled();
+     expect(prisma.user.findUnique).toHaveBeenCalledWith({
+       where: { email: 'ada@example.test' },
+-      select: { id: true, email: true },
++      select: { id: true, email: true, disabledAt: true },
+     });
+     expect(mail.enqueue).toHaveBeenCalledWith(expect.anything(), {
+       kind: 'password_reset',
+@@ -133,6 +139,13 @@ describe('PasswordResetService.request', () => {
+     expect(mail.notifyQueued).not.toHaveBeenCalled();
+   });
+ 
++  it('queues nothing for a disabled account, as for an address without one', async () => {
++    const { service, mail } = setup({ owner: { ...USER, disabledAt: new Date() } });
++    service.request(USER.email);
++    await service.settled();
++    expect(mail.enqueue).not.toHaveBeenCalled();
++  });
++
+   it('does not wake the worker when the address got its share of messages', async () => {
+     const { service, mail } = setup();
+     mail.enqueue.mockResolvedValueOnce('suppressed');
+@@ -215,4 +228,13 @@ describe('PasswordResetService.confirm', () => {
+     await expect(service.confirm(TOKEN, GOOD)).rejects.toThrow(INVALID_RESET_LINK);
+     expect(tx.user.update).not.toHaveBeenCalled();
+   });
++
++  it('answers 404 for a disabled account: it keeps its password until enabled', async () => {
++    const { service, tx } = setup();
++    tx.user.findUnique
++      .mockResolvedValueOnce(USER)
++      .mockResolvedValueOnce({ ...USER, disabledAt: new Date() });
++    await expect(service.confirm(TOKEN, GOOD)).rejects.toThrow(INVALID_RESET_LINK);
++    expect(tx.user.update).not.toHaveBeenCalled();
++  });
+ });
+diff --git a/apps/api/src/auth/password-reset.service.ts b/apps/api/src/auth/password-reset.service.ts
+index 52b39e2..3aa0b4c 100644
+--- a/apps/api/src/auth/password-reset.service.ts
++++ b/apps/api/src/auth/password-reset.service.ts
+@@ -94,9 +94,10 @@ export class PasswordResetService {
+       await lockUser(tx, owner.id);
+       const account = await tx.user.findUnique({
+         where: { id: owner.id },
+-        select: { id: true, email: true, securityVersion: true },
++        select: { id: true, email: true, securityVersion: true, disabledAt: true },
+       });
+-      if (account === null) throw new NotFoundException(INVALID_RESET_LINK);
++      // Gone, or disabled: a disabled account keeps its password until enabled.
++      if (account?.disabledAt !== null) throw new NotFoundException(INVALID_RESET_LINK);
+       const used = await consumeAccountToken(tx, token, 'password_reset', account);
+       if (used === undefined) throw new NotFoundException(INVALID_RESET_LINK);
+       await tx.user.update({
+@@ -123,9 +124,10 @@ export class PasswordResetService {
+     const queued = await this.prisma.$transaction(async (tx) => {
+       const user = await tx.user.findUnique({
+         where: { email },
+-        select: { id: true, email: true },
++        select: { id: true, email: true, disabledAt: true },
+       });
+-      if (user === null) return false;
++      // No account, or a disabled one: no link, and the same answer.
++      if (user?.disabledAt !== null) return false;
+       const result = await this.mail.enqueue(tx, {
+         kind: 'password_reset',
+         to: user.email,
+diff --git a/apps/api/src/auth/sessions.service.spec.ts b/apps/api/src/auth/sessions.service.spec.ts
+index c6858cb..4c4e723 100644
+--- a/apps/api/src/auth/sessions.service.spec.ts
++++ b/apps/api/src/auth/sessions.service.spec.ts
+@@ -47,11 +47,19 @@ const matches = (row: Row, where: Where) =>
+ // An in-memory stand-in for the sessions table, enough for the rotation
+ // rules. The real queries, locks and constraints are exercised by
+ // auth.int.spec.ts against PostgreSQL.
+-function fakePrisma(rows: Row[], storedPasswordHash = PASSWORD_HASH) {
++function fakePrisma(
++  rows: Row[],
++  storedPasswordHash = PASSWORD_HASH,
++  accountDisabledAt: Date | null = null,
++) {
+   const session = {
+     findUnique: vi.fn(({ where }: { where: Where }) => {
+       const row = rows.find((candidate) => matches(candidate, where));
+-      return Promise.resolve(row ? { ...row, user: { ...USER, securityVersion: 4 } } : null);
++      return Promise.resolve(
++        row
++          ? { ...row, user: { ...USER, securityVersion: 4, disabledAt: accountDisabledAt } }
++          : null,
++      );
+     }),
+     update: vi.fn(({ where, data }: { where: Where; data: Partial<Row> }) => {
+       const row = rows.find((candidate) => matches(candidate, where));
+@@ -73,7 +81,11 @@ function fakePrisma(rows: Row[], storedPasswordHash = PASSWORD_HASH) {
+   };
+   const user = {
+     findUnique: vi.fn(() =>
+-      Promise.resolve({ passwordHash: storedPasswordHash, securityVersion: 4 }),
++      Promise.resolve({
++        passwordHash: storedPasswordHash,
++        securityVersion: 4,
++        disabledAt: accountDisabledAt,
++      }),
+     ),
+     update: vi.fn().mockResolvedValue({}),
+   };
+@@ -135,6 +147,15 @@ describe('SessionsService', () => {
+     expect(rows).toEqual([]);
+   });
+ 
++  it('starts no family for a disabled account, refused like a wrong password', async () => {
++    const rows: Row[] = [];
++    const { prisma } = fakePrisma(rows, PASSWORD_HASH, new Date());
++    await expect(new SessionsService(prisma).create(USER.id, PASSWORD_HASH)).rejects.toThrow(
++      'Invalid email or password',
++    );
++    expect(rows).toEqual([]);
++  });
++
+   it("runs onCreated in the session's transaction, once its row is written", async () => {
+     const rows: Row[] = [];
+     const { prisma, tx } = fakePrisma(rows);
+@@ -186,6 +207,15 @@ describe('SessionsService', () => {
+     expect($queryRaw).toHaveBeenCalled();
+   });
+ 
++  it("refuses a disabled account's token, even one disabled by hand", async () => {
++    const rows = [rowFor('old')];
++    const { prisma } = fakePrisma(rows, PASSWORD_HASH, new Date());
++    await expect(new SessionsService(prisma).rotate('old')).rejects.toThrow(
++      'Invalid or expired session',
++    );
++    expect(rows).toHaveLength(1);
++  });
++
+   it('never extends a session past the end of its family', async () => {
+     const familyExpiresAt = new Date(Date.now() + 60_000);
+     const { prisma } = fakePrisma([rowFor('old', { familyExpiresAt })]);
+diff --git a/apps/api/src/auth/sessions.service.ts b/apps/api/src/auth/sessions.service.ts
+index d756aa4..129dbf8 100644
+--- a/apps/api/src/auth/sessions.service.ts
++++ b/apps/api/src/auth/sessions.service.ts
+@@ -98,7 +98,8 @@ export class SessionsService implements OnModuleInit, OnModuleDestroy {
+   // Starts a new family (a sign-in). `verifiedPasswordHash` is the hash the
+   // caller checked the password against: if it changed since (a password
+   // change and revokeAll ran in between), no session is created, so a sign-in
+-  // with the old password can never outlive the revocation. `onCreated` runs
++  // with the old password can never outlive the revocation. Nor for a
++  // disabled account: refused like a wrong password, whichever flow signs in. `onCreated` runs
+   // in the same transaction, once the session is written: what it records (an
+   // audit event of the sign-in) commits with the session, or not at all.
+   async create(
+@@ -111,9 +112,9 @@ export class SessionsService implements OnModuleInit, OnModuleDestroy {
+       await lockUser(tx, userId);
+       const user = await tx.user.findUnique({
+         where: { id: userId },
+-        select: { passwordHash: true, securityVersion: true },
++        select: { passwordHash: true, securityVersion: true, disabledAt: true },
+       });
+-      if (user?.passwordHash !== verifiedPasswordHash) {
++      if (user?.passwordHash !== verifiedPasswordHash || user.disabledAt !== null) {
+         throw new UnauthorizedException('Invalid email or password');
+       }
+       const now = Date.now();
+@@ -150,7 +151,14 @@ export class SessionsService implements OnModuleInit, OnModuleDestroy {
+         where: { tokenHash },
+         include: {
+           user: {
+-            select: { id: true, email: true, name: true, role: true, securityVersion: true },
++            select: {
++              id: true,
++              email: true,
++              name: true,
++              role: true,
++              securityVersion: true,
++              disabledAt: true,
++            },
+           },
+         },
+       });
+@@ -168,6 +176,8 @@ export class SessionsService implements OnModuleInit, OnModuleDestroy {
+         return { error: 'reuse', userId: current.userId };
+       }
+       if (current.expiresAt.getTime() <= now) return { error: 'invalid' };
++      // Disabling ends every session; this covers an account disabled by hand.
++      if (current.user.disabledAt !== null) return { error: 'invalid' };
+ 
+       await tx.session.update({
+         where: { id: current.id },
+@@ -184,7 +194,7 @@ export class SessionsService implements OnModuleInit, OnModuleDestroy {
+           expiresAt,
+         },
+       });
+-      const { securityVersion, ...user } = current.user;
++      const { securityVersion, disabledAt: _disabledAt, ...user } = current.user;
+       return { user, securityVersion, session: { token: next, expiresAt } };
+     }, SESSION_TRANSACTION);
+ 
+diff --git a/apps/api/src/users/dto/user.schemas.ts b/apps/api/src/users/dto/user.schemas.ts
+index b9833b7..ef0640e 100644
+--- a/apps/api/src/users/dto/user.schemas.ts
++++ b/apps/api/src/users/dto/user.schemas.ts
+@@ -9,14 +9,20 @@ export const UserSchema = z.object({
+   email: z.email(),
+   name: z.string(),
+   role: z.enum(ROLES),
++  /** When an admin disabled the account; null while it may sign in. */
++  disabledAt: z.iso.datetime().nullable(),
+   createdAt: z.iso.datetime(),
+ });
+ export type UserResponse = z.infer<typeof UserSchema>;
+ 
+ export const UserPageSchema = pageOf(UserSchema);
+ 
+-// What an admin changes about an account.
+-export const UpdateUserSchema = z.strictObject({ role: z.enum(ROLES) });
++// What an admin changes about an account: its role, whether it may sign in.
++export const UpdateUserSchema = z
++  .strictObject({ role: z.enum(ROLES).optional(), disabled: z.boolean().optional() })
++  .refine((changes) => changes.role !== undefined || changes.disabled !== undefined, {
++    message: 'Give role or disabled',
++  });
+ export type UpdateUserDto = z.infer<typeof UpdateUserSchema>;
+ 
+ export const USER_SELECT = {
+@@ -24,5 +30,6 @@ export const USER_SELECT = {
+   email: true,
+   name: true,
+   role: true,
++  disabledAt: true,
+   createdAt: true,
+ } as const;
+diff --git a/apps/api/src/users/user-changes.int.spec.ts b/apps/api/src/users/user-changes.int.spec.ts
+index d987cfa..1a5b675 100644
+--- a/apps/api/src/users/user-changes.int.spec.ts
++++ b/apps/api/src/users/user-changes.int.spec.ts
+@@ -3,7 +3,7 @@ import request from 'supertest';
+ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+ import { MISSING_ID } from '../../test/access.js';
+ import { createTestApp, resetDatabase, type TestApp } from '../../test/app.js';
+-import { asUser, bearer, seedUser, signIn } from '../../test/auth.js';
++import { asUser, bearer, seedUser, signIn, TEST_PASSWORD } from '../../test/auth.js';
+ import { envelopeOf } from '../../test/http.js';
+ import type { UserResponse } from './dto/user.schemas.js';
+ import { UsersService } from './users.service.js';
+@@ -93,4 +93,54 @@ describe('Changes to users (integration)', () => {
+       await expect(t.prisma.user.count({ where: { role: 'admin' } })).resolves.toBe(1);
+     });
+   });
++
++  describe('PATCH /api/users/:id (admins only): disabled', () => {
++    it('validates the change', async () => {
++      const res = await patch(member.id, {}).set(asAdmin()).expect(400);
++      expect(envelopeOf(res).message).toBe('body: Give role or disabled');
++      await patch(member.id, { disabled: 'yes' }).set(asAdmin()).expect(400);
++    });
++
++    it('disables an account: its sessions and access tokens end, and it cannot sign in', async () => {
++      const browser = await signIn(t.server, member.email);
++      const res = await patch(member.id, { disabled: true }).set(asAdmin()).expect(200);
++      expect(envelopeOf<UserResponse>(res).data.disabledAt).not.toBeNull();
++
++      await request(t.server).get('/api/users/me').set(bearer(browser.accessToken)).expect(401);
++      await request(t.server)
++        .post('/api/auth/refresh')
++        .set('Cookie', browser.refreshCookie)
++        .expect(401);
++      // Refused like a wrong password: nothing tells the account is disabled.
++      const refused = await request(t.server)
++        .post('/api/auth/sign-in')
++        .send({ email: member.email, password: TEST_PASSWORD })
++        .expect(401);
++      const wrong = await request(t.server)
++        .post('/api/auth/sign-in')
++        .send({ email: member.email, password: 'not-the-password' })
++        .expect(401);
++      expect(refused.body).toEqual(wrong.body);
++    });
++
++    it('enables it again: it signs in with its password', async () => {
++      await patch(member.id, { disabled: true }).set(asAdmin()).expect(200);
++      const res = await patch(member.id, { disabled: false }).set(asAdmin()).expect(200);
++      expect(envelopeOf<UserResponse>(res).data.disabledAt).toBeNull();
++      await signIn(t.server, member.email);
++    });
++
++    it('refuses to disable your own account, and the last admin who may sign in', async () => {
++      const own = await patch(admin.id, { disabled: true }).set(asAdmin()).expect(409);
++      expect(envelopeOf(own).message).toBe('You cannot disable your own account');
++
++      const second = await seedUser(t.prisma, { email: 'second@example.com', role: 'admin' });
++      await patch(second.id, { disabled: true }).set(asAdmin()).expect(200);
++      // The disabled admin does not count: the only one left may not stop being one.
++      const last = await patch(admin.id, { role: 'member' })
++        .set(asUser(t.app, admin.id, 'admin'))
++        .expect(409);
++      expect(envelopeOf(last).message).toBe('The last admin cannot stop being one');
++    });
++  });
+ });
+diff --git a/apps/api/src/users/users.controller.ts b/apps/api/src/users/users.controller.ts
+index d958149..5673344 100644
+--- a/apps/api/src/users/users.controller.ts
++++ b/apps/api/src/users/users.controller.ts
+@@ -53,9 +53,9 @@ export class UsersController {
+   @Patch(':id')
+   @RequireRoles('admin')
+   @ApiOperation({
+-    summary: "Change a user's role (admins only)",
++    summary: "Change a user's role, or disable or enable the account (admins only)",
+     description:
+-      "The account's access tokens end at once; its next refresh carries the new role. 409: the last admin cannot stop being one.",
++      "Either change ends the account's access tokens at once. After a role change its next refresh carries the new role; disabling also ends every session, and the account cannot sign in (it is refused like a wrong password) until it is enabled again. 409: the last admin who may sign in cannot stop being one or be disabled, and nobody disables their own account.",
+   })
+   @ZodBody(UpdateUserSchema)
+   @ApiData(UserSchema)
+diff --git a/apps/api/src/users/users.service.spec.ts b/apps/api/src/users/users.service.spec.ts
+index d27db1c..7ef0dc5 100644
+--- a/apps/api/src/users/users.service.spec.ts
++++ b/apps/api/src/users/users.service.spec.ts
+@@ -71,30 +71,35 @@ describe('UsersService.list', () => {
+   });
+ });
+ 
+-/** A transaction over one stored account; `otherAdmins` admins besides it. */
+-function setupUpdate(current: { role: 'member' | 'admin' } | null, otherAdmins = 1) {
+-  const stored = current === null ? null : { ...record(OTHER_ID), ...current };
++/** A transaction over one stored account; `otherAdmins` admins who may sign in besides it. */
++function setupUpdate(
++  current: { role: 'member' | 'admin'; disabledAt?: Date | null } | null,
++  otherAdmins = 1,
++) {
++  const row = current === null ? null : { disabledAt: null, ...current };
++  const stored = row === null ? null : { ...record(OTHER_ID), ...row };
+   const user = {
+-    findUnique: vi.fn().mockResolvedValue(current),
++    findUnique: vi.fn().mockResolvedValue(row),
+     findUniqueOrThrow: vi.fn().mockResolvedValue(stored),
+-    update: vi.fn(({ data }: { data: { role: string } }) =>
+-      Promise.resolve({ ...stored, role: data.role }),
++    update: vi.fn(({ data }: { data: { role: string; disabledAt?: Date | null } }) =>
++      Promise.resolve({ ...stored, ...data }),
+     ),
+     count: vi.fn().mockResolvedValue(otherAdmins),
+   };
++  const session = { updateMany: vi.fn().mockResolvedValue({ count: 2 }) };
+   // The admins' and the account's row locks (SELECT ... FOR UPDATE).
+   const $queryRaw = vi.fn().mockResolvedValue([]);
+-  const tx = { user, $queryRaw };
++  const tx = { user, session, $queryRaw };
+   const prisma = {
+     $transaction: vi.fn(<T>(work: (client: typeof tx) => Promise<T>) => work(tx)),
+   } as unknown as PrismaService;
+   vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+-  return { service: new UsersService(prisma), user, $queryRaw };
++  return { service: new UsersService(prisma), user, session, $queryRaw };
+ }
+ 
+ describe('UsersService.update (role)', () => {
+   it("changes the role and raises the securityVersion: the account's access tokens end", async () => {
+-    const { service, user, $queryRaw } = setupUpdate({ role: 'member' });
++    const { service, user, session, $queryRaw } = setupUpdate({ role: 'member' });
+     await expect(service.update(ADMIN.id, OTHER_ID, { role: 'admin' })).resolves.toMatchObject({
+       id: OTHER_ID,
+       role: 'admin',
+@@ -105,17 +110,19 @@ describe('UsersService.update (role)', () => {
+         data: { role: 'admin', securityVersion: { increment: 1 } },
+       }),
+     );
++    // The sessions go on, with the new role at their next refresh.
++    expect(session.updateMany).not.toHaveBeenCalled();
+     // A promotion leaves every admin in place: only the account's lock.
+     expect($queryRaw).toHaveBeenCalledOnce();
+   });
+ 
+-  it('locks the admins before a demotion, and keeps the last one', async () => {
++  it('locks the admins before a demotion, and keeps the last one who may sign in', async () => {
+     const demoted = setupUpdate({ role: 'admin' }, 1);
+     await demoted.service.update(ADMIN.id, OTHER_ID, { role: 'member' });
+     // The admins, then the account.
+     expect(demoted.$queryRaw).toHaveBeenCalledTimes(2);
+     expect(demoted.user.count).toHaveBeenCalledWith({
+-      where: { role: 'admin', id: { not: OTHER_ID } },
++      where: { role: 'admin', disabledAt: null, id: { not: OTHER_ID } },
+     });
+ 
+     const last = setupUpdate({ role: 'admin' }, 0);
+@@ -125,11 +132,11 @@ describe('UsersService.update (role)', () => {
+     expect(last.user.update).not.toHaveBeenCalled();
+   });
+ 
+-  it('changes nothing for the role the account already has', async () => {
++  it('changes nothing for what the account already is', async () => {
+     const { service, user } = setupUpdate({ role: 'member' });
+-    await expect(service.update(ADMIN.id, OTHER_ID, { role: 'member' })).resolves.toMatchObject({
+-      role: 'member',
+-    });
++    await expect(
++      service.update(ADMIN.id, OTHER_ID, { role: 'member', disabled: false }),
++    ).resolves.toMatchObject({ role: 'member', disabledAt: null });
+     expect(user.update).not.toHaveBeenCalled();
+   });
+ 
+@@ -140,3 +147,53 @@ describe('UsersService.update (role)', () => {
+     );
+   });
+ });
++
++describe('UsersService.update (disabled)', () => {
++  it('disables an account: every session and access token ends in the same transaction', async () => {
++    const { service, user, session } = setupUpdate({ role: 'member' });
++    const updated = await service.update(ADMIN.id, OTHER_ID, { disabled: true });
++    expect(updated.disabledAt).toBeInstanceOf(Date);
++    expect(user.update).toHaveBeenCalledWith(
++      expect.objectContaining({
++        data: expect.objectContaining({
++          disabledAt: expect.any(Date) as Date,
++          securityVersion: { increment: 1 },
++        }) as object,
++      }),
++    );
++    expect(session.updateMany).toHaveBeenCalledWith({
++      where: { userId: OTHER_ID, revokedAt: null },
++      data: { revokedAt: expect.any(Date) as Date },
++    });
++  });
++
++  it('enables it again: it may sign in, nothing else comes back', async () => {
++    const { service, user, session } = setupUpdate({ role: 'member', disabledAt: new Date() });
++    await expect(service.update(ADMIN.id, OTHER_ID, { disabled: false })).resolves.toMatchObject({
++      disabledAt: null,
++    });
++    expect(user.update).toHaveBeenCalledWith(
++      expect.objectContaining({ data: expect.objectContaining({ disabledAt: null }) as object }),
++    );
++    expect(session.updateMany).not.toHaveBeenCalled();
++  });
++
++  it('refuses to disable your own account, and the last admin who may sign in', async () => {
++    const own = setupUpdate({ role: 'admin' }, 3);
++    await expect(own.service.update(OTHER_ID, OTHER_ID, { disabled: true })).rejects.toThrow(
++      new ConflictException('You cannot disable your own account'),
++    );
++    const last = setupUpdate({ role: 'admin' }, 0);
++    await expect(last.service.update(ADMIN.id, OTHER_ID, { disabled: true })).rejects.toThrow(
++      new ConflictException('The last admin cannot be disabled'),
++    );
++    expect(last.user.update).not.toHaveBeenCalled();
++  });
++
++  it('lets a disabled admin be demoted, as one who cannot sign in already', async () => {
++    const { service, user } = setupUpdate({ role: 'admin', disabledAt: new Date() }, 0);
++    await service.update(ADMIN.id, OTHER_ID, { role: 'member' });
++    expect(user.count).not.toHaveBeenCalled();
++    expect(user.update).toHaveBeenCalled();
++  });
++});
+diff --git a/apps/api/src/users/users.service.ts b/apps/api/src/users/users.service.ts
+index 4a32799..0db30d0 100644
+--- a/apps/api/src/users/users.service.ts
++++ b/apps/api/src/users/users.service.ts
+@@ -1,5 +1,5 @@
+ import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+-import { lockUser } from '../auth/sessions.service.js';
++import { lockUser, revokeSessionsLocked } from '../auth/sessions.service.js';
+ import type { Page, PageQuery } from '../common/pagination.js';
+ import type { RequestUser } from '../common/types/request-user.js';
+ import { Prisma } from '../prisma/generated/client.js';
+@@ -57,44 +57,79 @@ export class UsersService {
+   }
+ 
+   /**
+-   * An admin changes an account, their own included: its role. In one
+-   * transaction under the account's lock, the change raises the account's
+-   * securityVersion, so its access tokens end at once and the next refresh
+-   * carries the new role (its sessions go on). One admin always remains.
++   * An admin changes an account: its role (their own included), whether it
++   * may sign in (anyone's but their own). In one transaction under the
++   * account's lock, either change raises the account's securityVersion, so
++   * its access tokens end at once: after a role change the next refresh
++   * carries the new role and the sessions go on; disabling also ends every
++   * session, and sign-in, refresh and the access-token guard refuse the
++   * account until it is enabled again. One admin who may sign in always
++   * remains.
+    */
+   async update(adminId: string, id: string, changes: UpdateUserDto): Promise<User> {
+-    const user = await this.prisma.$transaction(async (tx) => {
+-      if (changes.role !== 'admin') await lockAdmins(tx);
++    const outcome = await this.prisma.$transaction(async (tx) => {
++      if (changes.role === 'member' || changes.disabled === true) await lockAdmins(tx);
+       await lockUser(tx, id);
+-      const current = await tx.user.findUnique({ where: { id }, select: { role: true } });
++      const current = await tx.user.findUnique({
++        where: { id },
++        select: { role: true, disabledAt: true },
++      });
+       if (!current) throw new NotFoundException('User not found');
+-      if (current.role === changes.role) {
+-        return tx.user.findUniqueOrThrow({ where: { id }, select: USER_SELECT });
++      const role = changes.role ?? current.role;
++      const disabling = changes.disabled === true && current.disabledAt === null;
++      const enabling = changes.disabled === false && current.disabledAt !== null;
++      if (disabling && id === adminId) {
++        throw new ConflictException('You cannot disable your own account');
++      }
++      if (current.role === 'admin' && current.disabledAt === null) {
++        if (disabling) await assertAnotherAdmin(tx, id, 'The last admin cannot be disabled');
++        else if (role !== 'admin') {
++          await assertAnotherAdmin(tx, id, 'The last admin cannot stop being one');
++        }
++      }
++      const changed = role !== current.role || disabling || enabling;
++      if (!changed) {
++        return {
++          changed,
++          user: await tx.user.findUniqueOrThrow({ where: { id }, select: USER_SELECT }),
++        };
+       }
+-      if (current.role === 'admin') await assertAnotherAdmin(tx, id);
+-      return tx.user.update({
++      const user = await tx.user.update({
+         where: { id },
+-        data: { role: changes.role, securityVersion: { increment: 1 } },
++        data: {
++          role,
++          ...(disabling ? { disabledAt: new Date() } : enabling ? { disabledAt: null } : {}),
++          securityVersion: { increment: 1 },
++        },
+         select: USER_SELECT,
+       });
++      if (disabling) await revokeSessionsLocked(tx, id);
++      return { changed, user };
+     }, USER_TRANSACTION);
+-    this.logger.log(`User ${id} has the role ${user.role}, set by admin ${adminId}`);
++    const { user } = outcome;
++    if (outcome.changed) {
++      this.logger.log(
++        `User ${id} changed by admin ${adminId}: role ${user.role}, ${user.disabledAt === null ? 'enabled' : 'disabled'}`,
++      );
++    }
+     return user;
+   }
+ }
+ 
+ /**
+  * Locks every admin's row, in one order: a change that may leave the project
+- * without an admin (a demotion) runs one at a time, so two admins demoting
+- * each other at once cannot both succeed, and they wait for each other
+- * instead of deadlocking.
++ * without an admin who may sign in (a demotion, disabling an account) runs one
++ * at a time, so two admins demoting or disabling each other at once cannot
++ * both succeed, and they wait for each other instead of deadlocking.
+  */
+ async function lockAdmins(tx: Tx): Promise<void> {
+   await tx.$queryRaw`SELECT "id" FROM "users" WHERE "role" = 'admin' ORDER BY "id" FOR UPDATE`;
+ }
+ 
+-/** 409 unless an admin other than `id` remains; under lockAdmins. */
+-async function assertAnotherAdmin(tx: Tx, id: string): Promise<void> {
+-  const others = await tx.user.count({ where: { role: 'admin', id: { not: id } } });
+-  if (others === 0) throw new ConflictException('The last admin cannot stop being one');
++/** 409 unless an admin other than `id` who may sign in remains; under lockAdmins. */
++async function assertAnotherAdmin(tx: Tx, id: string, refusal: string): Promise<void> {
++  const others = await tx.user.count({
++    where: { role: 'admin', disabledAt: null, id: { not: id } },
++  });
++  if (others === 0) throw new ConflictException(refusal);
+ }
+diff --git a/apps/web/performance-budget.json b/apps/web/performance-budget.json
+index 83ad7cd..8bf05a2 100644
+--- a/apps/web/performance-budget.json
++++ b/apps/web/performance-budget.json
+@@ -1,5 +1,5 @@
+ {
+-  "$comment": "Gzip size budgets for the built web assets, checked by `pnpm perf:check` after `pnpm build`. Set from the template's measured build rounded up: the initial JavaScript (every visit: the entry index.html loads and the chunks it preloads, whatever the bundler names them) 108.1 kB, the error tracking chunk (fetched only when WEB_SENTRY_DSN is set) 31 kB, the Web Vitals chunks (fetched after the first render, the library only for sampled page loads) 4.2 kB, the account and admin pages (password recovery and change, sign-up and its confirmation, change of email and its undo, invitations and their acceptance, fetched when opened, with the helpers only they use) 12.2 kB, the focus and error handling of their forms included, an account's page for admins (its role, fetched when opened from the list of users) 1.1 kB, CSS 0.6 kB. The total keeps a new lazy chunk from hiding outside the named ones; it grew from 145 to 157 kB with the account and admin pages. Each project sets its own from its performance targets (docs/testing.md#performance-budget).",
++  "$comment": "Gzip size budgets for the built web assets, checked by `pnpm perf:check` after `pnpm build`. Set from the template's measured build rounded up: the initial JavaScript (every visit: the entry index.html loads and the chunks it preloads, whatever the bundler names them) 108.1 kB, the error tracking chunk (fetched only when WEB_SENTRY_DSN is set) 31 kB, the Web Vitals chunks (fetched after the first render, the library only for sampled page loads) 4.2 kB, the account and admin pages (password recovery and change, sign-up and its confirmation, change of email and its undo, invitations and their acceptance, fetched when opened, with the helpers only they use) 12.2 kB, the focus and error handling of their forms included, an account's page for admins (its role and whether it may sign in, fetched when opened from the list of users) 1.4 kB, CSS 0.6 kB. The total keeps a new lazy chunk from hiding outside the named ones; it grew from 145 to 157 kB with the account and admin pages, and to 158 kB with an account's page for admins. Each project sets its own from its performance targets (docs/testing.md#performance-budget).",
+   "budgets": [
+     {
+       "name": "JavaScript, initial",
+@@ -29,7 +29,7 @@
+     {
+       "name": "JavaScript, total",
+       "pattern": "\\.js$",
+-      "maxGzipKb": 157
++      "maxGzipKb": 158
+     },
+     {
+       "name": "CSS",
+diff --git a/apps/web/src/api/schema.d.ts b/apps/web/src/api/schema.d.ts
+index e414e73..8dbac16 100644
+--- a/apps/web/src/api/schema.d.ts
++++ b/apps/web/src/api/schema.d.ts
+@@ -345,8 +345,8 @@ export interface paths {
+         options?: never;
+         head?: never;
+         /**
+-         * Change a user's role (admins only)
+-         * @description The account's access tokens end at once; its next refresh carries the new role. 409: the last admin cannot stop being one.
++         * Change a user's role, or disable or enable the account (admins only)
++         * @description Either change ends the account's access tokens at once. After a role change its next refresh carries the new role; disabling also ends every session, and the account cannot sign in (it is refused like a wrong password) until it is enabled again. 409: the last admin who may sign in cannot stop being one or be disabled, and nobody disables their own account.
+          */
+         patch: operations["UsersController_update"];
+         trace?: never;
+@@ -1567,6 +1567,8 @@ export interface operations {
+                             /** @enum {string} */
+                             role: "member" | "admin";
+                             /** Format: date-time */
++                            disabledAt: string | null;
++                            /** Format: date-time */
+                             createdAt: string;
+                         };
+                         message: string;
+@@ -1631,6 +1633,8 @@ export interface operations {
+                                 /** @enum {string} */
+                                 role: "member" | "admin";
+                                 /** Format: date-time */
++                                disabledAt: string | null;
++                                /** Format: date-time */
+                                 createdAt: string;
+                             }[];
+                             total: number;
+@@ -1704,6 +1708,8 @@ export interface operations {
+                             /** @enum {string} */
+                             role: "member" | "admin";
+                             /** Format: date-time */
++                            disabledAt: string | null;
++                            /** Format: date-time */
+                             createdAt: string;
+                         };
+                         message: string;
+@@ -1761,7 +1767,8 @@ export interface operations {
+             content: {
+                 "application/json": {
+                     /** @enum {string} */
+-                    role: "member" | "admin";
++                    role?: "member" | "admin";
++                    disabled?: boolean;
+                 };
+             };
+         };
+@@ -1782,6 +1789,8 @@ export interface operations {
+                             /** @enum {string} */
+                             role: "member" | "admin";
+                             /** Format: date-time */
++                            disabledAt: string | null;
++                            /** Format: date-time */
+                             createdAt: string;
+                         };
+                         message: string;
+diff --git a/apps/web/src/pages/AdminUserPage.spec.tsx b/apps/web/src/pages/AdminUserPage.spec.tsx
+index 699e2a0..8e9966d 100644
+--- a/apps/web/src/pages/AdminUserPage.spec.tsx
++++ b/apps/web/src/pages/AdminUserPage.spec.tsx
+@@ -1,6 +1,6 @@
+ import { screen } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { resetForTests, setSession } from '../auth/session';
+ import { admin, member } from '../test/fixtures';
+ import { failure, ok, stubFetch } from '../test/http';
+@@ -8,11 +8,14 @@ import { renderRoute } from '../test/render';
+ 
+ const USER = `GET /api/users/${member.id}`;
+ const UPDATE = `PATCH /api/users/${member.id}`;
+-const record = (changes: Partial<typeof member> = {}) => ({
++type Stored = typeof member & { disabledAt: string | null; createdAt: string };
++const record = (changes: Partial<Stored> = {}): Stored => ({
+   ...member,
++  disabledAt: null,
+   createdAt: '2026-01-01T00:00:00.000Z',
+   ...changes,
+ });
++const DISABLED_AT = '2026-02-01T00:00:00.000Z';
+ const PAGE = `/admin/users/${member.id}`;
+ 
+ beforeEach(() => {
+@@ -21,6 +24,7 @@ beforeEach(() => {
+ });
+ afterEach(() => {
+   resetForTests();
++  vi.restoreAllMocks();
+ });
+ 
+ describe('AdminUserPage', () => {
+@@ -77,4 +81,62 @@ describe('AdminUserPage', () => {
+     await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }));
+     expect(await screen.findByRole('heading', { name: member.name })).toBeInTheDocument();
+   });
++
++  it('disables the account once the admin confirms, and enables it again', async () => {
++    let disabled = false;
++    const { calls } = stubFetch({
++      [USER]: () => ok(record()),
++      [UPDATE]: () => ok(record({ disabledAt: disabled ? DISABLED_AT : null })),
++    });
++    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
++    renderRoute(PAGE);
++    const user = userEvent.setup();
++    expect(await screen.findByText('Active')).toBeInTheDocument();
++
++    // Not confirmed: nothing is sent.
++    await user.click(screen.getByRole('button', { name: 'Disable the account' }));
++    expect(calls.some((request) => request.method === 'PATCH')).toBe(false);
++
++    disabled = true;
++    await user.click(screen.getByRole('button', { name: 'Disable the account' }));
++    expect(confirm).toHaveBeenCalledWith(
++      `Disable ${member.name}'s account? They are signed out everywhere at once.`,
++    );
++    expect(
++      await screen.findByText(
++        `${member.name} cannot sign in any more, and was signed out everywhere.`,
++      ),
++    ).toBeInTheDocument();
++    expect(await calls.find((request) => request.method === 'PATCH')?.json()).toEqual({
++      disabled: true,
++    });
++    expect(screen.getByText(/^Disabled since /)).toBeInTheDocument();
++
++    disabled = false;
++    await user.click(screen.getByRole('button', { name: 'Enable the account' }));
++    expect(await screen.findByText(`${member.name} can sign in again.`)).toBeInTheDocument();
++    expect(screen.getByText('Active')).toBeInTheDocument();
++  });
++
++  it('says why the last admin who can sign in stays enabled', async () => {
++    stubFetch({
++      [USER]: () => ok(record({ role: 'admin' })),
++      [UPDATE]: () => failure(409, 'The last admin cannot be disabled'),
++    });
++    vi.spyOn(window, 'confirm').mockReturnValue(true);
++    renderRoute(PAGE);
++    await userEvent
++      .setup()
++      .click(await screen.findByRole('button', { name: 'Disable the account' }));
++    expect(await screen.findByRole('alert')).toHaveTextContent(
++      'This is the last admin who can sign in: make another account an admin first.',
++    );
++  });
++
++  it('offers no way to disable your own account', async () => {
++    stubFetch({ [`GET /api/users/${admin.id}`]: () => ok({ ...record(), ...admin }) });
++    renderRoute(`/admin/users/${admin.id}`);
++    expect(await screen.findByText('You cannot disable your own account.')).toBeInTheDocument();
++    expect(screen.queryByRole('button', { name: 'Disable the account' })).toBeNull();
++  });
+ });
+diff --git a/apps/web/src/pages/AdminUserPage.tsx b/apps/web/src/pages/AdminUserPage.tsx
+index ae49a66..57a8429 100644
+--- a/apps/web/src/pages/AdminUserPage.tsx
++++ b/apps/web/src/pages/AdminUserPage.tsx
+@@ -2,6 +2,7 @@ import { useState } from 'react';
+ import { Link, useParams } from 'react-router';
+ import { api } from '../api/client';
+ import { type ApiFailure, call, describeFailure } from '../api/errors';
++import { useAuth } from '../auth';
+ import type { Role } from '../auth/types';
+ import { Alert } from '../components/Alert';
+ import { LoadFailed } from '../components/LoadFailed';
+@@ -10,21 +11,31 @@ import { useLoader } from '../hooks/useLoader';
+ const fetchUser = (id: string) => call(api.GET('/api/users/{id}', { params: { path: { id } } }));
+ 
+ type User = Extract<Awaited<ReturnType<typeof fetchUser>>, { ok: true }>['data'];
++interface Changes {
++  role?: Role;
++  disabled?: boolean;
++}
+ 
+ /** What a refused change means here, in the words of this page. */
+-function changeFailure(failure: ApiFailure): string {
++function changeFailure(failure: ApiFailure, changes: Changes): string {
+   if (failure.status === 404) return 'This account no longer exists.';
+-  if (failure.status === 409) return 'This is the last admin: make another account an admin first.';
++  if (failure.status === 409) {
++    return changes.disabled === true
++      ? 'This is the last admin who can sign in: make another account an admin first.'
++      : 'This is the last admin: make another account an admin first.';
++  }
+   return describeFailure(failure);
+ }
+ 
+ /**
+  * Admins only: the route is guarded here and, authoritatively, by the API.
+  * One account, and what an admin changes about it: its role (its access
+- * ends at once, and its next refresh carries the new role).
++ * ends at once, and its next refresh carries the new role), and whether it
++ * may sign in (disabling signs it out everywhere at once).
+  */
+ export function AdminUserPage() {
+   const { id = '' } = useParams();
++  const auth = useAuth();
+   const { state, retry } = useLoader(() => fetchUser(id), id);
+   // The account as the last change answered it, shown over the one loaded:
+   // no reload, so the page keeps its place and the focus.
+@@ -33,17 +44,17 @@ export function AdminUserPage() {
+   const [notice, setNotice] = useState<string | null>(null);
+   const [failure, setFailure] = useState<string | null>(null);
+ 
+-  async function changeRole(role: Role): Promise<void> {
++  async function change(changes: Changes, done: (user: User) => string): Promise<void> {
+     setNotice(null);
+     setFailure(null);
+     const result = await call(
+-      api.PATCH('/api/users/{id}', { params: { path: { id } }, body: { role } }),
++      api.PATCH('/api/users/{id}', { params: { path: { id } }, body: changes }),
+     );
+     if (result.ok) {
+       setUpdated(result.data);
+-      setNotice(`${result.data.name} is now ${role === 'admin' ? 'an admin' : 'a member'}.`);
++      setNotice(done(result.data));
+     } else {
+-      setFailure(changeFailure(result.failure));
++      setFailure(changeFailure(result.failure, changes));
+     }
+   }
+ 
+@@ -70,11 +81,38 @@ export function AdminUserPage() {
+             <dd>{user.email}</dd>
+             <dt>Role</dt>
+             <dd>{user.role}</dd>
++            <dt>Status</dt>
++            <dd>
++              {user.disabledAt === null
++                ? 'Active'
++                : `Disabled since ${new Date(user.disabledAt).toLocaleString()}`}
++            </dd>
+             <dt>Account created</dt>
+             <dd>{new Date(user.createdAt).toLocaleString()}</dd>
+           </dl>
+           {/* A new form when the role it shows changes: it starts from the account's. */}
+-          <RoleForm key={user.role} user={user} onChange={changeRole} />
++          <RoleForm
++            key={user.role}
++            user={user}
++            onChange={(role) =>
++              change(
++                { role },
++                (changed) =>
++                  `${changed.name} is now ${role === 'admin' ? 'an admin' : 'a member'}.`,
++              )
++            }
++          />
++          <SignInSection
++            user={user}
++            own={auth.status === 'authenticated' && auth.user.id === user.id}
++            onChange={(disabled) =>
++              change({ disabled }, (changed) =>
++                disabled
++                  ? `${changed.name} cannot sign in any more, and was signed out everywhere.`
++                  : `${changed.name} can sign in again.`,
++              )
++            }
++          />
+         </>
+       )}
+     </section>
+@@ -116,3 +154,52 @@ function RoleForm({ user, onChange }: { user: User; onChange: (role: Role) => Pr
+     </form>
+   );
+ }
++
++/**
++ * Whether the account may sign in. Disabling asks first (it signs the person
++ * out everywhere at once); nobody disables their own account.
++ */
++function SignInSection({
++  user,
++  own,
++  onChange,
++}: {
++  user: User;
++  own: boolean;
++  onChange: (disabled: boolean) => Promise<void>;
++}) {
++  const [submitting, setSubmitting] = useState(false);
++  const disabled = user.disabledAt !== null;
++
++  function submit(next: boolean) {
++    if (
++      next &&
++      !window.confirm(`Disable ${user.name}'s account? They are signed out everywhere at once.`)
++    ) {
++      return;
++    }
++    setSubmitting(true);
++    void onChange(next).finally(() => {
++      setSubmitting(false);
++    });
++  }
++
++  return (
++    <section className="stack" aria-labelledby="sign-in-heading">
++      <h2 id="sign-in-heading">Sign-in</h2>
++      {own ? (
++        <p>You cannot disable your own account.</p>
++      ) : (
++        <button
++          type="button"
++          disabled={submitting}
++          onClick={() => {
++            submit(!disabled);
++          }}
++        >
++          {disabled ? 'Enable the account' : 'Disable the account'}
++        </button>
++      )}
++    </section>
++  );
++}
+diff --git a/apps/web/src/pages/AdminUsersPage.spec.tsx b/apps/web/src/pages/AdminUsersPage.spec.tsx
+index 75c6301..89e2bd8 100644
+--- a/apps/web/src/pages/AdminUsersPage.spec.tsx
++++ b/apps/web/src/pages/AdminUsersPage.spec.tsx
+@@ -7,7 +7,11 @@ import { failure, json, ok, stubFetch } from '../test/http';
+ import { renderRoute } from '../test/render';
+ 
+ const LIST = 'GET /api/users';
+-const row = (user: typeof member) => ({ ...user, createdAt: '2026-01-01T00:00:00.000Z' });
++const row = (user: typeof member, disabledAt: string | null = null) => ({
++  ...user,
++  disabledAt,
++  createdAt: '2026-01-01T00:00:00.000Z',
++});
+ 
+ beforeEach(() => {
+   resetForTests();
+@@ -20,12 +24,13 @@ afterEach(() => {
+ describe('AdminUsersPage', () => {
+   it('lists the users the API returns', async () => {
+     const { calls } = stubFetch({
+-      [LIST]: () => ok({ items: [row(admin), row(member)], total: 2 }),
++      [LIST]: () => ok({ items: [row(admin), row(member, '2026-02-01T00:00:00.000Z')], total: 2 }),
+     });
+     renderRoute('/admin/users');
+ 
+     expect(await screen.findByRole('cell', { name: member.email })).toBeInTheDocument();
+     expect(screen.getByText('Showing 2 of 2.')).toBeInTheDocument();
++    expect(screen.getByRole('row', { name: /^Member .* Disabled$/ })).toBeInTheDocument();
+     // Each name opens the account's page.
+     expect(screen.getByRole('link', { name: member.name })).toHaveAttribute(
+       'href',
+diff --git a/apps/web/src/pages/AdminUsersPage.tsx b/apps/web/src/pages/AdminUsersPage.tsx
+index fc9f33a..532533c 100644
+--- a/apps/web/src/pages/AdminUsersPage.tsx
++++ b/apps/web/src/pages/AdminUsersPage.tsx
+@@ -33,6 +33,7 @@ export function AdminUsersPage() {
+                 <th scope="col">Name</th>
+                 <th scope="col">Email</th>
+                 <th scope="col">Role</th>
++                <th scope="col">Status</th>
+               </tr>
+             </thead>
+             <tbody>
+@@ -43,6 +44,7 @@ export function AdminUsersPage() {
+                   </td>
+                   <td>{user.email}</td>
+                   <td>{user.role}</td>
++                  <td>{user.disabledAt === null ? 'Active' : 'Disabled'}</td>
+                 </tr>
+               ))}
+             </tbody>
+diff --git a/docs/manual.es.md b/docs/manual.es.md
+index e81328c..2d6f8b3 100644
+--- a/docs/manual.es.md
++++ b/docs/manual.es.md
+@@ -905,10 +905,14 @@ invita cualquier dirección y abre el enlace desde Mailpit. El diseño:
+ [security.md](security.md#invitations).
+ 
+ **Administrar cuentas.** En "Users", cada nombre abre la página de la cuenta, donde un
+-administrador cambia su rol. El cambio aplica de inmediato: la siguiente página de esa persona ya
+-tiene el rol nuevo, sin volver a iniciar sesión. El último administrador no puede dejar de serlo.
+-Pruébalo en local: inicia sesión como `admin@example.com`, abre "Users", luego "Member", y hazlo
+-admin. El diseño: [security.md](security.md#authorization).
++administrador cambia su rol o desactiva la cuenta. Un rol nuevo aplica de inmediato: la siguiente
++página de esa persona ya lo tiene, sin volver a iniciar sesión. Desactivarla (tras una
++confirmación) cierra todas sus sesiones al instante, y no puede iniciar sesión ni recuperar la
++contraseña hasta que la cuenta se active de nuevo. Nadie desactiva su propia cuenta, y el último
++administrador que puede iniciar sesión no puede dejar de serlo ni ser desactivado. Pruébalo en
++local: inicia sesión como `admin@example.com`, abre "Users", luego "Member", y hazlo admin o
++desactívalo. El diseño: [security.md](security.md#authorization) y
++[cuentas desactivadas](security.md#disabled-accounts).
+ 
+ ## 12. Operar en producción
+ 
+diff --git a/docs/manual.md b/docs/manual.md
+index 7624275..3cfea62 100644
+--- a/docs/manual.md
++++ b/docs/manual.md
+@@ -872,10 +872,13 @@ it locally: sign in as `admin@example.com`, invite any address, and open the lin
+ design: [security.md](security.md#invitations).
+ 
+ **Managing accounts.** On "Users", each name opens the account's page, where an administrator
+-changes its role. The change applies at once: the person's next page already has the new role,
+-without signing in again. The last administrator cannot stop being one. Try it locally: sign in as
+-`admin@example.com`, open "Users", then "Member", and make it an admin. The design:
+-[security.md](security.md#authorization).
++changes its role or disables the account. A new role applies at once: the person's next page
++already has it, without signing in again. Disabling (after a confirmation) signs the person out
++everywhere at once, and they cannot sign in, nor recover the password, until the account is
++enabled again. Nobody disables their own account, and the last administrator who can sign in
++cannot stop being one or be disabled. Try it locally: sign in as `admin@example.com`, open
++"Users", then "Member", and make it an admin or disable it. The design:
++[security.md](security.md#authorization) and [disabled accounts](security.md#disabled-accounts).
+ 
+ ## 12. Running in production
+ 
+diff --git a/docs/security.md b/docs/security.md
+index 0a81d5a..49da8c5 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -230,6 +230,24 @@ password) in someone else's hands cannot take the account for good:
+   history, and opening a link changes nothing (the page's button does). The notice to the
+   previous address shows the new one masked (`a•••@example.com`).
+ 
++### Disabled accounts
++
++An admin disables an account from its page (`PATCH /api/users/:id` with `disabled: true`), after
++confirming; nobody disables their own account, and the last admin who may sign in cannot be
++disabled. In one transaction under the account's lock, `users.disabled_at` is set, every session
++ends and `security_version` rises, so the person is signed out everywhere at once. While it is
++set:
++
++- sign-in answers exactly as for a wrong password (`SessionsService.create`, which every way of
++  signing in goes through, refuses it), so the page tells nobody the account exists or is
++  disabled;
++- refresh and `JwtAuthGuard` refuse it too, even when the column was set by hand without the rest;
++- password recovery sends nothing, as for an unknown address, and a link sent before is refused:
++  the account keeps its password.
++
++Enabling it (`disabled: false`) lets the person sign in again with that password; nothing else
++comes back.
++
+ ### Web client
+ 
+ - **401 handling** (`web/src/auth/middleware.ts`): a 401 to a request that carried a token
+@@ -296,13 +314,14 @@ Two layers, both required:
+ 
+ An admin changes a role with `PATCH /api/users/:id` (the account's page, `/admin/users/:id`): the
+ change raises the account's `security_version`, so its access tokens end at once and its next
+-refresh carries the new role; its sessions go on. One admin always remains: a demotion locks every
+-admin's row first, so two admins demoting each other at once cannot both succeed. An access token
+-already issued stays valid until it expires (at most 15 minutes) unless the account's `security_version` changes: a password change
+-or reset increments it, and `JwtAuthGuard` then refuses every older access token at once.
++refresh carries the new role; its sessions go on. One admin who may sign in always remains: a
++demotion locks every admin's row first, so two admins demoting each other at once cannot both
++succeed. Otherwise an access token already issued stays valid until it expires (at most 15
++minutes) unless the account's `security_version` changes: a password change or reset increments
++it, and `JwtAuthGuard` then refuses every older access token at once.
+ `SessionsService.revokeAll(userId)`, and `endSessionsLocked(tx, userId)` inside a transaction that
+ holds the user's lock, end every refresh session and raise it in the same transaction: use them
+-for any other change that must end access at once (a role removed, an account disabled).
++for any other change that must end access at once.
+ 
+ ### Route protection
+ 
+diff --git a/e2e/users.e2e.ts b/e2e/users.e2e.ts
+index 0de533c..63a1cdf 100644
+--- a/e2e/users.e2e.ts
++++ b/e2e/users.e2e.ts
+@@ -50,3 +50,37 @@ test('an administrator makes a member an admin: their next page has the admin pa
+   await expect(theirPage.getByRole('link', { name: 'Users' })).toBeVisible();
+   await theirs.close();
+ });
++
++test('an administrator disables an account: the person is signed out and cannot sign in until it is enabled', async ({
++  page,
++  browser,
++}) => {
++  const person = createAccount('Christine Darden');
++  const theirs = await browser.newContext();
++  const theirPage = await theirs.newPage();
++  await signIn(theirPage, person.email, person.password);
++  await expect(theirPage.getByRole('heading', { name: `Welcome, ${person.name}` })).toBeVisible();
++
++  await signIn(page, ADMIN.email, ADMIN.password);
++  await expect(page.getByRole('heading', { name: 'Welcome, Admin' })).toBeVisible();
++  await openAccount(page, person);
++  page.once('dialog', (dialog) => void dialog.accept());
++  await page.getByRole('button', { name: 'Disable the account' }).click();
++  await expect(
++    page.getByRole('status').filter({ hasText: `${person.name} cannot sign in any more` }),
++  ).toBeVisible();
++
++  // Signed out at once: their next page is the sign-in page.
++  await theirPage.reload();
++  await expect(theirPage).toHaveURL(/\/sign-in$/);
++  await signIn(theirPage, person.email, person.password);
++  await expect(theirPage.getByRole('alert')).toHaveText('Invalid email or password.');
++
++  await page.getByRole('button', { name: 'Enable the account' }).click();
++  await expect(
++    page.getByRole('status').filter({ hasText: `${person.name} can sign in again.` }),
++  ).toBeVisible();
++  await signIn(theirPage, person.email, person.password);
++  await expect(theirPage.getByRole('heading', { name: `Welcome, ${person.name}` })).toBeVisible();
++  await theirs.close();
++});
+diff --git a/openapi/openapi.json b/openapi/openapi.json
+index d35e2e2..83996e5 100644
+--- a/openapi/openapi.json
++++ b/openapi/openapi.json
+@@ -1814,6 +1814,11 @@
+                             "admin"
+                           ]
+                         },
++                        "disabledAt": {
++                          "nullable": true,
++                          "type": "string",
++                          "format": "date-time"
++                        },
+                         "createdAt": {
+                           "type": "string",
+                           "format": "date-time"
+@@ -1824,6 +1829,7 @@
+                         "email",
+                         "name",
+                         "role",
++                        "disabledAt",
+                         "createdAt"
+                       ],
+                       "additionalProperties": false
+@@ -1942,6 +1948,11 @@
+                                   "admin"
+                                 ]
+                               },
++                              "disabledAt": {
++                                "nullable": true,
++                                "type": "string",
++                                "format": "date-time"
++                              },
+                               "createdAt": {
+                                 "type": "string",
+                                 "format": "date-time"
+@@ -1952,6 +1963,7 @@
+                               "email",
+                               "name",
+                               "role",
++                              "disabledAt",
+                               "createdAt"
+                             ],
+                             "additionalProperties": false
+@@ -2076,6 +2088,11 @@
+                             "admin"
+                           ]
+                         },
++                        "disabledAt": {
++                          "nullable": true,
++                          "type": "string",
++                          "format": "date-time"
++                        },
+                         "createdAt": {
+                           "type": "string",
+                           "format": "date-time"
+@@ -2086,6 +2103,7 @@
+                         "email",
+                         "name",
+                         "role",
++                        "disabledAt",
+                         "createdAt"
+                       ],
+                       "additionalProperties": false
+@@ -2150,7 +2168,7 @@
+         ]
+       },
+       "patch": {
+-        "description": "The account's access tokens end at once; its next refresh carries the new role. 409: the last admin cannot stop being one.",
++        "description": "Either change ends the account's access tokens at once. After a role change its next refresh carries the new role; disabling also ends every session, and the account cannot sign in (it is refused like a wrong password) until it is enabled again. 409: the last admin who may sign in cannot stop being one or be disabled, and nobody disables their own account.",
+         "operationId": "UsersController_update",
+         "parameters": [
+           {
+@@ -2176,11 +2194,11 @@
+                       "member",
+                       "admin"
+                     ]
++                  },
++                  "disabled": {
++                    "type": "boolean"
+                   }
+                 },
+-                "required": [
+-                  "role"
+-                ],
+                 "additionalProperties": false
+               }
+             }
+@@ -2219,6 +2237,11 @@
+                             "admin"
+                           ]
+                         },
++                        "disabledAt": {
++                          "nullable": true,
++                          "type": "string",
++                          "format": "date-time"
++                        },
+                         "createdAt": {
+                           "type": "string",
+                           "format": "date-time"
+@@ -2229,6 +2252,7 @@
+                         "email",
+                         "name",
+                         "role",
++                        "disabledAt",
+                         "createdAt"
+                       ],
+                       "additionalProperties": false
+@@ -2307,7 +2331,7 @@
+             "bearer": []
+           }
+         ],
+-        "summary": "Change a user's role (admins only)",
++        "summary": "Change a user's role, or disable or enable the account (admins only)",
+         "tags": [
+           "users"
+         ]

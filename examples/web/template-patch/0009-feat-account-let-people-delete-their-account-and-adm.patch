@@ -1,0 +1,1981 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 17:50:03 -0600
+Subject: [PATCH 09/10] feat(account): let people delete their account, and
+ admins delete others
+
+The schema already cascaded a user's rows, but nothing deleted an
+account, so the right to erasure had no way in, and an admin could not
+remove someone who left.
+
+POST /api/account/deletion deletes the signed-in person's account with
+the current password (limited like a sign-in), clears the browser's
+cookies and signs every tab out; the sign-in page then says so.
+DELETE /api/users/:id (admins only, not their own account) deletes
+another one. Either runs in one transaction under the admins' locks
+(the last admin who may sign in cannot be deleted, nor two admins
+delete each other at once) and the account's: its sessions, links and
+queued messages go with it, invitations it sent keep no sender, its
+access tokens stop at once. A new account_deleted notice (an enum value:
+an expand step) goes to the former address, queued without the user
+the deletion would take it along with, and carries no link.
+
+The lock helpers of the admin who always remains move to users/admins.ts.
+The account page's password-change specs scope their fields to their
+form, as the deletion form asks for the current password too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md                                     |  22 +--
+ .../migration.sql                             |   2 +
+ apps/api/prisma/schema.prisma                 |   3 +
+ .../src/account/account-deletion.int.spec.ts  | 125 ++++++++++++
+ apps/api/src/account/account.controller.ts    |  30 ++-
+ apps/api/src/account/account.service.spec.ts  |  67 ++++++-
+ apps/api/src/account/account.service.ts       |  46 +++++
+ apps/api/src/auth/auth.constants.ts           |   2 +
+ apps/api/src/auth/dto/auth.schemas.ts         |   5 +
+ .../mail/mail-outbox.service.spec.ts          |   1 +
+ .../account-deleted.template.spec.ts          |  48 +++++
+ .../templates/account-deleted.template.ts     |  49 +++++
+ .../infrastructure/mail/templates/registry.ts |   2 +
+ apps/api/src/users/admins.ts                  |  26 +++
+ apps/api/src/users/user-changes.int.spec.ts   |  33 ++++
+ apps/api/src/users/users.controller.ts        |  20 +-
+ apps/api/src/users/users.service.spec.ts      |  55 +++++-
+ apps/api/src/users/users.service.ts           |  57 ++++--
+ apps/web/performance-budget.json              |   4 +-
+ apps/web/src/api/schema.d.ts                  | 169 +++++++++++++++-
+ apps/web/src/auth/session.spec.ts             |  36 ++++
+ apps/web/src/auth/session.ts                  |  19 ++
+ apps/web/src/auth/types.ts                    |   5 +-
+ apps/web/src/auth/useAuth.ts                  |   3 +
+ apps/web/src/pages/AccountPage.spec.tsx       |  73 ++++++-
+ apps/web/src/pages/AccountPage.tsx            |  63 +++++-
+ apps/web/src/pages/AdminUserPage.spec.tsx     |  27 +++
+ apps/web/src/pages/AdminUserPage.tsx          |  60 +++++-
+ apps/web/src/pages/SignInPage.tsx             |   3 +
+ docs/manual.es.md                             |   8 +-
+ docs/manual.md                                |   8 +-
+ docs/security.md                              |  14 ++
+ e2e/users.e2e.ts                              |  44 +++++
+ openapi/openapi.json                          | 180 ++++++++++++++++++
+ 34 files changed, 1255 insertions(+), 54 deletions(-)
+ create mode 100644 apps/api/prisma/migrations/20261017233745_add_account_deleted_notice/migration.sql
+ create mode 100644 apps/api/src/account/account-deletion.int.spec.ts
+ create mode 100644 apps/api/src/infrastructure/mail/templates/account-deleted.template.spec.ts
+ create mode 100644 apps/api/src/infrastructure/mail/templates/account-deleted.template.ts
+ create mode 100644 apps/api/src/users/admins.ts
+
+diff --git a/README.md b/README.md
+index eec0f1c..782d277 100644
+--- a/README.md
++++ b/README.md
+@@ -13,17 +13,17 @@ and lists every command (en español: [docs/manual.es.md](docs/manual.es.md)).
+ 
+ ## Stack
+ 
+-| Area                     | Choice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+-| Runtime, package manager | Node.js 24, pnpm workspace                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+-| API                      | NestJS 12 (Express), Prisma 7 + PostgreSQL, Zod, OpenAPI generated from the schemas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+-| Web                      | React 19, Vite, React Router, openapi-fetch with types generated from the contract                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+-| Quality                  | TypeScript `strict`, ESLint (type-aware), Prettier, commitlint, Husky + lint-staged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+-| Tests                    | Vitest (unit, component, integration), Testing Library, supertest, Playwright (E2E)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+-| Security                 | helmet/CSP, CSRF guard, httpOnly refresh cookies with rotation and theft detection, RBAC + ownership checks, rate limits, password policy (NIST SP 800-63B-4), password recovery by one-time link and change with immediate sign-out of other sessions, optional public sign-up confirmed by email, change of email confirmed from the new address and undoable from the previous one, invitations by administrators; SAST (Semgrep, CodeQL opt-in), workflow audit (zizmor), DAST (OWASP ZAP), pnpm audit, dependency and license policy, secretlint, gitleaks, image scanning (Trivy) |
+-| Delivery                 | GitHub Actions (reusable gates, least privilege, pinned), Dependabot, release-please (SemVer, changelog, SBOM), Docker images (API, migrations, nginx web) with provenance                                                                                                                                                                                                                                                                                                                                                                                                              |
+-| Observability            | JSON logs with automatic redaction and request/trace correlation, health probes, graceful shutdown, error classification; optional: Sentry (API + web), OpenTelemetry traces and metrics (OTLP), local Grafana backend; dashboards, SLOs and alert rules as tested code                                                                                                                                                                                                                                                                                                                 |
+-| Optional infrastructure  | Redis (shared rate limits, cache, locks, idempotency) behind adapters with in-process fallbacks; transactional email (outbox over SMTP, Mailpit locally); none required to run, test or deploy                                                                                                                                                                                                                                                                                                                                                                                          |
++| Area                     | Choice                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
++| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
++| Runtime, package manager | Node.js 24, pnpm workspace                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
++| API                      | NestJS 12 (Express), Prisma 7 + PostgreSQL, Zod, OpenAPI generated from the schemas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
++| Web                      | React 19, Vite, React Router, openapi-fetch with types generated from the contract                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
++| Quality                  | TypeScript `strict`, ESLint (type-aware), Prettier, commitlint, Husky + lint-staged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
++| Tests                    | Vitest (unit, component, integration), Testing Library, supertest, Playwright (E2E)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
++| Security                 | helmet/CSP, CSRF guard, httpOnly refresh cookies with rotation and theft detection, RBAC + ownership checks, rate limits, password policy (NIST SP 800-63B-4), password recovery by one-time link and change with immediate sign-out of other sessions, optional public sign-up confirmed by email, change of email confirmed from the new address and undoable from the previous one, invitations by administrators, who also change roles, disable accounts, require new passwords and delete accounts, account deletion by its owner; SAST (Semgrep, CodeQL opt-in), workflow audit (zizmor), DAST (OWASP ZAP), pnpm audit, dependency and license policy, secretlint, gitleaks, image scanning (Trivy) |
++| Delivery                 | GitHub Actions (reusable gates, least privilege, pinned), Dependabot, release-please (SemVer, changelog, SBOM), Docker images (API, migrations, nginx web) with provenance                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
++| Observability            | JSON logs with automatic redaction and request/trace correlation, health probes, graceful shutdown, error classification; optional: Sentry (API + web), OpenTelemetry traces and metrics (OTLP), local Grafana backend; dashboards, SLOs and alert rules as tested code                                                                                                                                                                                                                                                                                                                                                                                                                                    |
++| Optional infrastructure  | Redis (shared rate limits, cache, locks, idempotency) behind adapters with in-process fallbacks; transactional email (outbox over SMTP, Mailpit locally); none required to run, test or deploy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+ 
+ ## Requirements
+ 
+diff --git a/apps/api/prisma/migrations/20261017233745_add_account_deleted_notice/migration.sql b/apps/api/prisma/migrations/20261017233745_add_account_deleted_notice/migration.sql
+new file mode 100644
+index 0000000..ba1d70c
+--- /dev/null
++++ b/apps/api/prisma/migrations/20261017233745_add_account_deleted_notice/migration.sql
+@@ -0,0 +1,2 @@
++-- AlterEnum
++ALTER TYPE "MailKind" ADD VALUE 'account_deleted';
+diff --git a/apps/api/prisma/schema.prisma b/apps/api/prisma/schema.prisma
+index 3836843..bc0b290 100644
+--- a/apps/api/prisma/schema.prisma
++++ b/apps/api/prisma/schema.prisma
+@@ -107,6 +107,9 @@ enum MailKind {
+   email_changed
+   // An administrator's invitation to create an account (limited per address).
+   invitation
++  // An account was deleted, by its owner or an admin: a notice to its former
++  // address (no account left to point to; a security notice, never held back).
++  account_deleted
+ }
+ 
+ enum MailStatus {
+diff --git a/apps/api/src/account/account-deletion.int.spec.ts b/apps/api/src/account/account-deletion.int.spec.ts
+new file mode 100644
+index 0000000..515c989
+--- /dev/null
++++ b/apps/api/src/account/account-deletion.int.spec.ts
+@@ -0,0 +1,125 @@
++import { Logger } from '@nestjs/common';
++import request from 'supertest';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { createTestApp, resetDatabase, type TestApp } from '../../test/app.js';
++import { asUser, bearer, cookiesOf, seedUser, signIn, TEST_PASSWORD } from '../../test/auth.js';
++import { envelopeOf } from '../../test/http.js';
++import {
++  deleteMessagesTo,
++  mailTestOptions,
++  messagesTo,
++  readMessage,
++  skipWithoutMailpit,
++  testAddress,
++} from '../../test/mailpit.js';
++import { MailWorker } from '../infrastructure/mail/mail-worker.service.js';
++import { MAIL_OPTIONS } from '../infrastructure/mail/mail.constants.js';
++
++// Deleting an account, against PostgreSQL and Mailpit: by its owner with the
++// current password, or by an admin. The account and what the schema cascades
++// go at once, every browser is signed out, and the address gets a notice.
++
++describe.skipIf(skipWithoutMailpit)('account deletion (PostgreSQL + Mailpit)', () => {
++  let t: TestApp;
++  let worker: MailWorker;
++  const addresses: string[] = [];
++
++  async function account(role: 'member' | 'admin' = 'member') {
++    const email = testAddress();
++    addresses.push(email);
++    return seedUser(t.prisma, { email, name: 'Grace Hopper', role });
++  }
++
++  /** The notice that reached the address, once the queue is delivered. */
++  async function noticeTo(email: string): Promise<string> {
++    await worker.runOnce();
++    const [newest] = await messagesTo(email);
++    if (newest === undefined) throw new Error(`no message to ${email}`);
++    expect(newest.Subject).toBe('Your Integration account was deleted');
++    return (await readMessage(newest.ID)).text;
++  }
++
++  const remove = (accessToken: string, currentPassword: string) =>
++    request(t.server)
++      .post('/api/account/deletion')
++      .set(bearer(accessToken))
++      .send({ currentPassword });
++
++  beforeEach(async () => {
++    t = await createTestApp((builder) =>
++      builder.overrideProvider(MAIL_OPTIONS).useValue(mailTestOptions()),
++    );
++    worker = t.app.get(MailWorker);
++    vi.spyOn(worker, 'wake').mockImplementation(() => undefined);
++    vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
++    await resetDatabase(t.prisma);
++    await seedUser(t.prisma, { email: testAddress(), role: 'admin' });
++  });
++
++  afterEach(async () => {
++    for (const email of addresses.splice(0)) await deleteMessagesTo(email);
++    await t.app.close();
++  });
++
++  it('deletes the account with its password: every browser is signed out, the address told', async () => {
++    const owner = await account();
++    const here = await signIn(t.server, owner.email);
++    const elsewhere = await signIn(t.server, owner.email);
++
++    const res = await remove(here.accessToken, TEST_PASSWORD).expect(204);
++    // This browser's cookies are cleared.
++    expect(cookiesOf(res).some((cookie) => cookie.startsWith('refresh_token=;'))).toBe(true);
++    await expect(t.prisma.user.findUnique({ where: { id: owner.id } })).resolves.toBeNull();
++    await expect(t.prisma.session.count({ where: { userId: owner.id } })).resolves.toBe(0);
++
++    await request(t.server).get('/api/users/me').set(bearer(elsewhere.accessToken)).expect(401);
++    await request(t.server)
++      .post('/api/auth/refresh')
++      .set('Cookie', elsewhere.refreshCookie)
++      .expect(401);
++    await request(t.server)
++      .post('/api/auth/sign-in')
++      .send({ email: owner.email, password: TEST_PASSWORD })
++      .expect(401);
++    expect(await noticeTo(owner.email)).toContain(
++      'It was deleted from its account page, with its password.',
++    );
++  });
++
++  it('asks for the current password again: a wrong one deletes nothing', async () => {
++    const owner = await account();
++    const { accessToken } = await signIn(t.server, owner.email);
++    const res = await remove(accessToken, 'not-the-password').expect(403);
++    expect(envelopeOf(res).message).toBe('The current password is wrong');
++    await remove(accessToken, '').expect(400);
++    await expect(t.prisma.user.findUnique({ where: { id: owner.id } })).resolves.not.toBeNull();
++    await request(t.server)
++      .post('/api/account/deletion')
++      .send({ currentPassword: 'x' })
++      .expect(401);
++  });
++
++  it('keeps the last admin who may sign in', async () => {
++    await resetDatabase(t.prisma);
++    const only = await account('admin');
++    const { accessToken } = await signIn(t.server, only.email);
++    const res = await remove(accessToken, TEST_PASSWORD).expect(409);
++    expect(envelopeOf(res).message).toBe('The last admin cannot be deleted');
++
++    await account('admin');
++    await remove(accessToken, TEST_PASSWORD).expect(204);
++  });
++
++  it('lets an admin delete another account, which is told an administrator did', async () => {
++    const admin = await account('admin');
++    const member = await account();
++    const theirs = await signIn(t.server, member.email);
++    await request(t.server)
++      .delete(`/api/users/${member.id}`)
++      .set(asUser(t.app, admin.id, 'admin'))
++      .expect(204);
++    await expect(t.prisma.user.findUnique({ where: { id: member.id } })).resolves.toBeNull();
++    await request(t.server).get('/api/users/me').set(bearer(theirs.accessToken)).expect(401);
++    expect(await noticeTo(member.email)).toContain('An administrator deleted it.');
++  });
++});
+diff --git a/apps/api/src/account/account.controller.ts b/apps/api/src/account/account.controller.ts
+index c3cf1e5..f4c3d48 100644
+--- a/apps/api/src/account/account.controller.ts
++++ b/apps/api/src/account/account.controller.ts
+@@ -1,7 +1,11 @@
+ import { Body, Controller, HttpCode, Post, Res } from '@nestjs/common';
+ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+ import type { Response } from 'express';
+-import { EMAIL_CHANGE_RATE_LIMIT, PASSWORD_CHANGE_RATE_LIMIT } from '../auth/auth.constants.js';
++import {
++  ACCOUNT_DELETION_RATE_LIMIT,
++  EMAIL_CHANGE_RATE_LIMIT,
++  PASSWORD_CHANGE_RATE_LIMIT,
++} from '../auth/auth.constants.js';
+ import { Auth } from '../auth/auth.decorator.js';
+ import {
+   type AuthSession,
+@@ -10,8 +14,10 @@ import {
+   ChangeEmailSchema,
+   type ChangePasswordDto,
+   ChangePasswordSchema,
++  type DeleteAccountDto,
++  DeleteAccountSchema,
+ } from '../auth/dto/auth.schemas.js';
+-import { respondWithSession } from '../auth/session-cookies.js';
++import { clearSessionCookies, respondWithSession } from '../auth/session-cookies.js';
+ import { CurrentUser } from '../common/decorators/current-user.decorator.js';
+ import { RouteRateLimit } from '../common/guards/rate-limit.guard.js';
+ import type { ApiEnvelope } from '../common/interceptors/transform.interceptor.js';
+@@ -72,4 +78,24 @@ export class AccountController {
+   async changeEmail(@CurrentUser() user: RequestUser, @Body() body: ChangeEmailDto): Promise<void> {
+     await this.emailChange.request(user.id, body.currentPassword, body.newEmail);
+   }
++
++  @Post('deletion')
++  @HttpCode(204)
++  @RouteRateLimit(ACCOUNT_DELETION_RATE_LIMIT)
++  @ApiOperation({
++    summary: 'Delete the account, confirming the current password',
++    description:
++      "The account and its sessions end at once, this browser's cookies are cleared, and a notice goes to its address. 403: the current password is wrong. 409: the last admin who may sign in cannot be deleted, or the password changed meanwhile.",
++  })
++  @ZodBody(DeleteAccountSchema)
++  @ApiResponse({ status: 204, description: 'Deleted' })
++  @ApiErrors(400, 403, 409)
++  async deleteAccount(
++    @CurrentUser() user: RequestUser,
++    @Body() body: DeleteAccountDto,
++    @Res({ passthrough: true }) res: Response,
++  ): Promise<void> {
++    await this.account.deleteAccount(user.id, body.currentPassword);
++    clearSessionCookies(res);
++  }
+ }
+diff --git a/apps/api/src/account/account.service.spec.ts b/apps/api/src/account/account.service.spec.ts
+index 6f1a39f..56bc871 100644
+--- a/apps/api/src/account/account.service.spec.ts
++++ b/apps/api/src/account/account.service.spec.ts
+@@ -27,12 +27,21 @@ beforeEach(() => {
+   vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+ });
+ 
+-function setup({ storedHashInTransaction }: { storedHashInTransaction?: string } = {}) {
++function setup({
++  storedHashInTransaction,
++  role = 'member',
++  otherAdmins = 1,
++}: {
++  storedHashInTransaction?: string;
++  role?: 'member' | 'admin';
++  /** Admins who may sign in besides this account. */
++  otherAdmins?: number;
++} = {}) {
+   const user = {
+     id: 'u1',
+     email: 'ada@example.test',
+     name: 'Ada Lovelace',
+-    role: 'member' as const,
++    role,
+     passwordHash: currentHash,
+   };
+   const calls: string[] = [];
+@@ -45,9 +54,16 @@ function setup({ storedHashInTransaction }: { storedHashInTransaction?: string }
+       findUnique: vi.fn(() =>
+         Promise.resolve({
+           email: user.email,
++          role,
++          disabledAt: null,
+           passwordHash: storedHashInTransaction ?? currentHash,
+         }),
+       ),
++      count: vi.fn(() => Promise.resolve(otherAdmins)),
++      delete: vi.fn(() => {
++        calls.push('delete user');
++        return Promise.resolve(user);
++      }),
+       update: vi.fn((args: unknown) => {
+         calls.push('update user');
+         return Promise.resolve(args);
+@@ -168,3 +184,50 @@ describe('AccountService.changePassword', () => {
+     );
+   });
+ });
++
++describe('AccountService.deleteAccount', () => {
++  it('checks the password again, then deletes the account and queues a notice without it', async () => {
++    const { service, tx, mail, calls } = setup();
++    await service.deleteAccount('u1', CURRENT);
++    expect(calls).toEqual(['lock user', 'delete user', 'queue notice']);
++    expect(tx.user.delete).toHaveBeenCalledWith({ where: { id: 'u1' } });
++    expect(mail.enqueue).toHaveBeenCalledWith(expect.anything(), {
++      kind: 'account_deleted',
++      to: 'ada@example.test',
++      payload: { deletedAt: expect.any(String) as string, by: 'owner' },
++    });
++    expect(mail.notifyQueued).toHaveBeenCalledOnce();
++  });
++
++  it('refuses a wrong password, and a password that changed meanwhile', async () => {
++    const wrong = setup();
++    await expect(wrong.service.deleteAccount('u1', 'not it')).rejects.toThrow(
++      new ForbiddenException('The current password is wrong'),
++    );
++    expect(wrong.prisma.$transaction).not.toHaveBeenCalled();
++
++    const changed = setup({ storedHashInTransaction: '$argon2id$changed' });
++    await expect(changed.service.deleteAccount('u1', CURRENT)).rejects.toThrow(ConflictException);
++    expect(changed.tx.user.delete).not.toHaveBeenCalled();
++  });
++
++  it('keeps the last admin who may sign in, locking the admins first', async () => {
++    const last = setup({ role: 'admin', otherAdmins: 0 });
++    await expect(last.service.deleteAccount('u1', CURRENT)).rejects.toThrow(
++      new ConflictException('The last admin cannot be deleted'),
++    );
++    expect(last.tx.user.delete).not.toHaveBeenCalled();
++
++    const another = setup({ role: 'admin', otherAdmins: 1 });
++    await another.service.deleteAccount('u1', CURRENT);
++    // The admins' lock, then the account's.
++    expect(another.calls.slice(0, 2)).toEqual(['lock user', 'lock user']);
++    expect(another.tx.user.delete).toHaveBeenCalled();
++  });
++
++  it('answers 404 for an account that is already gone', async () => {
++    const { service, prisma } = setup();
++    prisma.user.findUnique.mockResolvedValueOnce(null as never);
++    await expect(service.deleteAccount('u1', CURRENT)).rejects.toThrow(NotFoundException);
++  });
++});
+diff --git a/apps/api/src/account/account.service.ts b/apps/api/src/account/account.service.ts
+index 89668b0..cac9fa3 100644
+--- a/apps/api/src/account/account.service.ts
++++ b/apps/api/src/account/account.service.ts
+@@ -11,9 +11,11 @@ import { checkPassword, hashPassword } from '../auth/password.js';
+ import { passwordProblem } from '../auth/password-policy.js';
+ import { lockUser, revokeSessionsLocked, SessionsService } from '../auth/sessions.service.js';
+ import { MailOutboxService } from '../infrastructure/mail/mail-outbox.service.js';
++import type { AccountDeletedPayload } from '../infrastructure/mail/templates/account-deleted.template.js';
+ import type { PasswordChangedPayload } from '../infrastructure/mail/templates/password-changed.template.js';
+ import { Prisma } from '../prisma/generated/client.js';
+ import { PrismaService } from '../prisma/prisma.service.js';
++import { assertAnotherAdmin, lockAdmins } from '../users/admins.js';
+ 
+ const ACCOUNT_TRANSACTION = { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted };
+ 
+@@ -90,4 +92,48 @@ export class AccountService {
+     const { passwordHash: _hash, ...authUser } = user;
+     return { session: await this.auth.sessionFor(authUser, refresh.securityVersion), refresh };
+   }
++
++  /**
++   * Deletes the person's own account (the right to erasure), after the
++   * current password is checked again. In one transaction, under the admins'
++   * locks for an admin (the last admin who may sign in stays) and the
++   * account's: the account goes, and with it what the schema cascades (its
++   * sessions, links and queued messages; invitations it sent keep no
++   * sender), and a notice is queued to its address. The caller clears this
++   * browser's cookies.
++   */
++  async deleteAccount(userId: string, currentPassword: string): Promise<void> {
++    const user = await this.prisma.user.findUnique({
++      where: { id: userId },
++      select: { id: true, email: true, role: true, passwordHash: true },
++    });
++    if (user === null) throw new NotFoundException('User not found');
++    if (!(await checkPassword(user.passwordHash, currentPassword))) {
++      // 403, not 401: the session is fine, the confirmation is not.
++      throw new ForbiddenException('The current password is wrong');
++    }
++
++    const payload: AccountDeletedPayload = { deletedAt: new Date().toISOString(), by: 'owner' };
++    await this.prisma.$transaction(async (tx) => {
++      if (user.role === 'admin') await lockAdmins(tx);
++      await lockUser(tx, user.id);
++      const current = await tx.user.findUnique({
++        where: { id: user.id },
++        select: { email: true, role: true, passwordHash: true, disabledAt: true },
++      });
++      // A password change or reset got there first: checked against a
++      // password that is no longer the account's.
++      if (current?.passwordHash !== user.passwordHash) {
++        throw new ConflictException('The password changed meanwhile');
++      }
++      if (current.role === 'admin' && current.disabledAt === null) {
++        await assertAnotherAdmin(tx, user.id, 'The last admin cannot be deleted');
++      }
++      await tx.user.delete({ where: { id: user.id } });
++      // Without the user: the deletion would take the message with it.
++      await this.mail.enqueue(tx, { kind: 'account_deleted', to: current.email, payload });
++    }, ACCOUNT_TRANSACTION);
++    this.mail.notifyQueued();
++    this.logger.log(`Account ${user.id} deleted by its owner`);
++  }
+ }
+diff --git a/apps/api/src/auth/auth.constants.ts b/apps/api/src/auth/auth.constants.ts
+index ed058d1..ab2b37d 100644
+--- a/apps/api/src/auth/auth.constants.ts
++++ b/apps/api/src/auth/auth.constants.ts
+@@ -68,6 +68,8 @@ export const SIGN_UP_CONFIRM_RATE_LIMIT: RouteLimit = { limit: 10, ttlSec: 15 *
+ // hashes a new password): this bounds the work a client can cause.
+ export const EMAIL_CHANGE_RATE_LIMIT: RouteLimit = { limit: 5, ttlSec: 15 * 60 };
+ export const EMAIL_CHANGE_LINK_RATE_LIMIT: RouteLimit = { limit: 10, ttlSec: 15 * 60 };
++// Deleting the account checks the current password: limited like a sign-in.
++export const ACCOUNT_DELETION_RATE_LIMIT: RouteLimit = { limit: 5, ttlSec: 15 * 60 };
+ // Inviting (administrators): each invitation sends a message; each address
+ // also gets at most one a minute and a few a day.
+ export const INVITATION_RATE_LIMIT: RouteLimit = { limit: 30, ttlSec: 15 * 60 };
+diff --git a/apps/api/src/auth/dto/auth.schemas.ts b/apps/api/src/auth/dto/auth.schemas.ts
+index 0438442..ea395ec 100644
+--- a/apps/api/src/auth/dto/auth.schemas.ts
++++ b/apps/api/src/auth/dto/auth.schemas.ts
+@@ -102,6 +102,11 @@ export const ChangeEmailSchema = z.object({
+ });
+ export type ChangeEmailDto = z.infer<typeof ChangeEmailSchema>;
+ 
++export const DeleteAccountSchema = z.object({
++  currentPassword: z.string().min(1, 'Current password is required').max(PASSWORD_MAX_INPUT_LENGTH),
++});
++export type DeleteAccountDto = z.infer<typeof DeleteAccountSchema>;
++
+ export const EmailChangeConfirmSchema = z.object({ token: ONE_TIME_TOKEN });
+ export type EmailChangeConfirmDto = z.infer<typeof EmailChangeConfirmSchema>;
+ 
+diff --git a/apps/api/src/infrastructure/mail/mail-outbox.service.spec.ts b/apps/api/src/infrastructure/mail/mail-outbox.service.spec.ts
+index f0d1ca3..085c075 100644
+--- a/apps/api/src/infrastructure/mail/mail-outbox.service.spec.ts
++++ b/apps/api/src/infrastructure/mail/mail-outbox.service.spec.ts
+@@ -33,6 +33,7 @@ const registry = (limited: boolean): MailTemplates => ({
+   email_change_existing: template(limited),
+   email_changed: template(limited),
+   invitation: template(limited),
++  account_deleted: template(limited),
+ });
+ 
+ function txWith({ minute = 0, day = 0, created = 1 } = {}) {
+diff --git a/apps/api/src/infrastructure/mail/templates/account-deleted.template.spec.ts b/apps/api/src/infrastructure/mail/templates/account-deleted.template.spec.ts
+new file mode 100644
+index 0000000..024c330
+--- /dev/null
++++ b/apps/api/src/infrastructure/mail/templates/account-deleted.template.spec.ts
+@@ -0,0 +1,48 @@
++import { describe, expect, it } from 'vitest';
++import type { Prisma } from '../../../prisma/generated/client.js';
++import type { ClaimedMessage } from '../mail.types.js';
++import { accountDeletedTemplate } from './account-deleted.template.js';
++
++const message = (payload: unknown): ClaimedMessage => ({
++  id: 'm1',
++  kind: 'account_deleted',
++  recipient: 'ada@example.test',
++  // The account is gone: the message has no user.
++  userId: null,
++  payload,
++  attempts: 1,
++  expiresAt: new Date(Date.now() + 60_000),
++  createdAt: new Date(),
++  requestId: null,
++});
++const context = {
++  // The notice reads nothing: there is no account left.
++  tx: {} as Prisma.TransactionClient,
++  product: 'Acme',
++  appOrigin: 'https://app.acme.test',
++};
++
++describe('the account deleted notice', () => {
++  it('says when and by whom, and what to do if it was not the owner, with no link', async () => {
++    const rendered = await accountDeletedTemplate.compose({
++      message: message({ deletedAt: '2026-10-17T12:30:00.000Z', by: 'admin' }),
++      ...context,
++    });
++    expect(rendered?.subject).toBe('Your Acme account was deleted');
++    expect(rendered?.text).toContain('deleted on 2026-10-17 12:30:00 UTC');
++    expect(rendered?.text).toContain('An administrator deleted it.');
++    expect(rendered?.text).toContain('If you did not, tell the people who run Acme');
++    expect(rendered?.text).not.toContain('https://');
++    expect(accountDeletedTemplate.limited).toBe(false);
++  });
++
++  it('names the owner, and still tells with a malformed payload', async () => {
++    const owner = await accountDeletedTemplate.compose({
++      message: message({ deletedAt: '2026-10-17T12:30:00.000Z', by: 'owner' }),
++      ...context,
++    });
++    expect(owner?.text).toContain('It was deleted from its account page, with its password.');
++    const odd = await accountDeletedTemplate.compose({ message: message({}), ...context });
++    expect(odd?.text).toContain('deleted just now');
++  });
++});
+diff --git a/apps/api/src/infrastructure/mail/templates/account-deleted.template.ts b/apps/api/src/infrastructure/mail/templates/account-deleted.template.ts
+new file mode 100644
+index 0000000..40bdf36
+--- /dev/null
++++ b/apps/api/src/infrastructure/mail/templates/account-deleted.template.ts
+@@ -0,0 +1,49 @@
++import { z } from 'zod';
++import { renderMail } from './layout.js';
++import type { MailTemplate } from './registry.js';
++
++/** What the message is about: queued with the deletion (account/, users/). */
++export const AccountDeletedPayloadSchema = z.object({
++  /** When the account was deleted, ISO 8601. */
++  deletedAt: z.iso.datetime(),
++  /** By its owner, with its password, or by an admin. */
++  by: z.enum(['owner', 'admin']),
++});
++export type AccountDeletedPayload = z.infer<typeof AccountDeletedPayloadSchema>;
++
++// A security notice to the former address of a deleted account: a person who
++// did not delete it learns it. Queued without a user (the deletion takes the
++// account's messages with it), it has no account to point to and no link, and
++// is never held back by the per-address limits.
++export const accountDeletedTemplate: MailTemplate = {
++  limited: false,
++  ttlMs: 24 * 60 * 60_000,
++  compose({ message, product }) {
++    const payload = AccountDeletedPayloadSchema.safeParse(message.payload);
++    const when = payload.success
++      ? `on ${payload.data.deletedAt.replace('T', ' ').replace(/\.\d+Z$|Z$/, '')} UTC`
++      : 'just now';
++    const by =
++      payload.success && payload.data.by === 'admin'
++        ? 'An administrator deleted it.'
++        : 'It was deleted from its account page, with its password.';
++    return Promise.resolve(
++      renderMail(
++        {
++          subject: `Your ${product} account was deleted`,
++          heading: 'Your account was deleted',
++          paragraphs: [
++            `The ${product} account of this address was deleted ${when}.`,
++            by,
++            'Every session of the account was signed out, and the account cannot be used again.',
++          ],
++          footer: [
++            'If you deleted it, there is nothing to do.',
++            `If you did not, tell the people who run ${product}: someone may know your password, and you may use it elsewhere.`,
++          ],
++        },
++        product,
++      ),
++    );
++  },
++};
+diff --git a/apps/api/src/infrastructure/mail/templates/registry.ts b/apps/api/src/infrastructure/mail/templates/registry.ts
+index 9cd1b8f..99eef7c 100644
+--- a/apps/api/src/infrastructure/mail/templates/registry.ts
++++ b/apps/api/src/infrastructure/mail/templates/registry.ts
+@@ -1,6 +1,7 @@
+ import type { MailKind, Prisma } from '../../../prisma/generated/client.js';
+ import type { ClaimedMessage, MailOptions } from '../mail.types.js';
+ import type { RenderedMail } from './layout.js';
++import { accountDeletedTemplate } from './account-deleted.template.js';
+ import { emailChangeConfirmationTemplate } from './email-change-confirmation.template.js';
+ import { emailChangeExistingTemplate } from './email-change-existing.template.js';
+ import { emailChangedTemplate } from './email-changed.template.js';
+@@ -42,6 +43,7 @@ export const MAIL_TEMPLATE_REGISTRY: MailTemplates = {
+   email_change_existing: emailChangeExistingTemplate,
+   email_changed: emailChangedTemplate,
+   invitation: invitationTemplate,
++  account_deleted: accountDeletedTemplate,
+ };
+ 
+ /** What messages call the product: the sender's display name, else the public host. */
+diff --git a/apps/api/src/users/admins.ts b/apps/api/src/users/admins.ts
+new file mode 100644
+index 0000000..fd83525
+--- /dev/null
++++ b/apps/api/src/users/admins.ts
+@@ -0,0 +1,26 @@
++import { ConflictException } from '@nestjs/common';
++import type { Prisma } from '../prisma/generated/client.js';
++
++// The admin who may sign in that always remains: every change that may take
++// the last one away (a demotion, disabling or deleting an account) goes
++// through these, in its transaction.
++
++type Tx = Prisma.TransactionClient;
++
++/**
++ * Locks every admin's row, in one order: a change that may leave the project
++ * without an admin who may sign in runs one at a time, so two admins demoting,
++ * disabling or deleting each other at once cannot both succeed, and they wait
++ * for each other instead of deadlocking. Take it before the account's own lock.
++ */
++export async function lockAdmins(tx: Tx): Promise<void> {
++  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "role" = 'admin' ORDER BY "id" FOR UPDATE`;
++}
++
++/** 409 unless an admin other than `id` who may sign in remains; under lockAdmins. */
++export async function assertAnotherAdmin(tx: Tx, id: string, refusal: string): Promise<void> {
++  const others = await tx.user.count({
++    where: { role: 'admin', disabledAt: null, id: { not: id } },
++  });
++  if (others === 0) throw new ConflictException(refusal);
++}
+diff --git a/apps/api/src/users/user-changes.int.spec.ts b/apps/api/src/users/user-changes.int.spec.ts
+index aed1f3d..6fc5faa 100644
+--- a/apps/api/src/users/user-changes.int.spec.ts
++++ b/apps/api/src/users/user-changes.int.spec.ts
+@@ -177,4 +177,37 @@ describe('Changes to users (integration)', () => {
+         .expect(401);
+     });
+   });
++
++  describe('DELETE /api/users/:id (admins only)', () => {
++    const remove = (id: string) => request(t.server).delete(`/api/users/${id}`);
++
++    it('needs an admin, refuses their own account, and answers 404 for a missing one', async () => {
++      await remove(member.id).expect(401);
++      await remove(member.id).set(asUser(t.app, member.id)).expect(403);
++      const own = await remove(admin.id).set(asAdmin()).expect(409);
++      expect(envelopeOf(own).message).toBe('Delete your own account from your account page');
++      await remove(MISSING_ID).set(asAdmin()).expect(404);
++      await expect(t.prisma.user.count()).resolves.toBe(2);
++    });
++
++    it('deletes the account with what the schema cascades; its access token stops at once', async () => {
++      const browser = await signIn(t.server, member.email);
++      await remove(member.id).set(asAdmin()).expect(204);
++      await expect(t.prisma.user.findUnique({ where: { id: member.id } })).resolves.toBeNull();
++      await expect(t.prisma.session.count({ where: { userId: member.id } })).resolves.toBe(0);
++      await request(t.server).get('/api/users/me').set(bearer(browser.accessToken)).expect(401);
++      await remove(member.id).set(asAdmin()).expect(404);
++    });
++
++    it('lets only one of two admins deleting each other at once succeed', async () => {
++      const second = await seedUser(t.prisma, { email: 'second@example.com', role: 'admin' });
++      const users = t.app.get(UsersService);
++      const outcomes = await Promise.allSettled([
++        users.remove(admin.id, second.id),
++        users.remove(second.id, admin.id),
++      ]);
++      expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(['fulfilled', 'rejected']);
++      await expect(t.prisma.user.count({ where: { role: 'admin' } })).resolves.toBe(1);
++    });
++  });
+ });
+diff --git a/apps/api/src/users/users.controller.ts b/apps/api/src/users/users.controller.ts
+index cf7ffa4..fe363ac 100644
+--- a/apps/api/src/users/users.controller.ts
++++ b/apps/api/src/users/users.controller.ts
+@@ -1,6 +1,7 @@
+ import {
+   Body,
+   Controller,
++  Delete,
+   Get,
+   HttpCode,
+   Param,
+@@ -9,7 +10,7 @@ import {
+   Post,
+   Query,
+ } from '@nestjs/common';
+-import { ApiOperation, ApiTags } from '@nestjs/swagger';
++import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+ import { Auth, RequireRoles } from '../auth/auth.decorator.js';
+ import { CurrentUser } from '../common/decorators/current-user.decorator.js';
+ import { ApiData, ApiErrors, ZodBody, ZodQuery } from '../common/openapi/index.js';
+@@ -91,4 +92,21 @@ export class UsersController {
+   requirePasswordChange(@CurrentUser() actor: RequestUser, @Param('id', ParseUUIDPipe) id: string) {
+     return this.users.requirePasswordChange(actor.id, id);
+   }
++
++  @Delete(':id')
++  @HttpCode(204)
++  @RequireRoles('admin')
++  @ApiOperation({
++    summary: 'Delete an account (admins only)',
++    description:
++      "The account and its sessions end at once, and a notice goes to its address. 409: an admin's own account (deleted from the account page, with its password), or the last admin who may sign in.",
++  })
++  @ApiResponse({ status: 204, description: 'Deleted' })
++  @ApiErrors(400, 404, 409)
++  async remove(
++    @CurrentUser() actor: RequestUser,
++    @Param('id', ParseUUIDPipe) id: string,
++  ): Promise<void> {
++    await this.users.remove(actor.id, id);
++  }
+ }
+diff --git a/apps/api/src/users/users.service.spec.ts b/apps/api/src/users/users.service.spec.ts
+index 1e8cada..3a42da3 100644
+--- a/apps/api/src/users/users.service.spec.ts
++++ b/apps/api/src/users/users.service.spec.ts
+@@ -1,6 +1,7 @@
+ import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
+ import { describe, expect, it, vi } from 'vitest';
+ import type { RequestUser } from '../common/types/request-user.js';
++import type { MailOutboxService } from '../infrastructure/mail/mail-outbox.service.js';
+ import type { PrismaService } from '../prisma/prisma.service.js';
+ import { UsersService } from './users.service.js';
+ 
+@@ -9,6 +10,17 @@ const ADMIN: RequestUser = { id: '0190b6a1-0000-7000-8000-000000000002', role: '
+ const OTHER_ID = '0190b6a1-0000-7000-8000-000000000003';
+ const record = (id: string) => ({ id, email: `${id}@example.com`, name: 'N', role: 'member' });
+ 
++/** The outbox: what a deletion queues, in its transaction. */
++function fakeMail() {
++  return {
++    enqueue: vi.fn().mockResolvedValue('queued'),
++    notifyQueued: vi.fn(),
++  } as unknown as MailOutboxService & {
++    enqueue: ReturnType<typeof vi.fn>;
++    notifyQueued: ReturnType<typeof vi.fn>;
++  };
++}
++
+ function setup(found: unknown = null) {
+   const findFirst = vi.fn().mockResolvedValue(found);
+   const findMany = vi.fn().mockReturnValue('findMany-query');
+@@ -18,7 +30,7 @@ function setup(found: unknown = null) {
+     user: { findFirst, findMany, count },
+     $transaction,
+   } as unknown as PrismaService;
+-  return { service: new UsersService(prisma), findFirst, findMany };
++  return { service: new UsersService(prisma, fakeMail()), findFirst, findMany };
+ }
+ 
+ describe('UsersService.findVisible (object-level authorization)', () => {
+@@ -76,7 +88,8 @@ function setupUpdate(
+   current: { role: 'member' | 'admin'; disabledAt?: Date | null } | null,
+   otherAdmins = 1,
+ ) {
+-  const row = current === null ? null : { disabledAt: null, ...current };
++  const row =
++    current === null ? null : { email: record(OTHER_ID).email, disabledAt: null, ...current };
+   const stored = row === null ? null : { ...record(OTHER_ID), ...row };
+   const user = {
+     findUnique: vi.fn().mockResolvedValue(row),
+@@ -85,6 +98,7 @@ function setupUpdate(
+       Promise.resolve({ ...stored, ...data }),
+     ),
+     count: vi.fn().mockResolvedValue(otherAdmins),
++    delete: vi.fn().mockResolvedValue(stored),
+   };
+   const session = { updateMany: vi.fn().mockResolvedValue({ count: 2 }) };
+   // The admins' and the account's row locks (SELECT ... FOR UPDATE).
+@@ -94,7 +108,8 @@ function setupUpdate(
+     $transaction: vi.fn(<T>(work: (client: typeof tx) => Promise<T>) => work(tx)),
+   } as unknown as PrismaService;
+   vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+-  return { service: new UsersService(prisma), user, session, $queryRaw };
++  const mail = fakeMail();
++  return { service: new UsersService(prisma, mail), user, session, mail, $queryRaw };
+ }
+ 
+ describe('UsersService.update (role)', () => {
+@@ -235,3 +250,37 @@ describe('UsersService.requirePasswordChange', () => {
+     );
+   });
+ });
++
++describe('UsersService.remove', () => {
++  it('deletes the account and queues a notice to its address, without the user', async () => {
++    const { service, user, mail, $queryRaw } = setupUpdate({ role: 'member' });
++    await service.remove(ADMIN.id, OTHER_ID);
++    // The admins, then the account.
++    expect($queryRaw).toHaveBeenCalledTimes(2);
++    expect(user.delete).toHaveBeenCalledWith({ where: { id: OTHER_ID } });
++    expect(mail.enqueue).toHaveBeenCalledWith(expect.anything(), {
++      kind: 'account_deleted',
++      to: `${OTHER_ID}@example.com`,
++      payload: { deletedAt: expect.any(String) as string, by: 'admin' },
++    });
++    expect(mail.notifyQueued).toHaveBeenCalledOnce();
++  });
++
++  it("refuses an admin's own account and the last admin who may sign in", async () => {
++    const own = setupUpdate({ role: 'admin' });
++    await expect(own.service.remove(ADMIN.id, ADMIN.id)).rejects.toThrow(
++      new ConflictException('Delete your own account from your account page'),
++    );
++    const last = setupUpdate({ role: 'admin' }, 0);
++    await expect(last.service.remove(ADMIN.id, OTHER_ID)).rejects.toThrow(
++      new ConflictException('The last admin cannot be deleted'),
++    );
++    expect(last.user.delete).not.toHaveBeenCalled();
++    expect(last.mail.notifyQueued).not.toHaveBeenCalled();
++  });
++
++  it('answers 404 for an account that does not exist', async () => {
++    const { service } = setupUpdate(null);
++    await expect(service.remove(ADMIN.id, OTHER_ID)).rejects.toThrow(NotFoundException);
++  });
++});
+diff --git a/apps/api/src/users/users.service.ts b/apps/api/src/users/users.service.ts
+index eb5aebe..4f40968 100644
+--- a/apps/api/src/users/users.service.ts
++++ b/apps/api/src/users/users.service.ts
+@@ -1,13 +1,15 @@
+ import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+ import { endSessionsLocked, lockUser, revokeSessionsLocked } from '../auth/sessions.service.js';
+ import type { Page, PageQuery } from '../common/pagination.js';
++import { MailOutboxService } from '../infrastructure/mail/mail-outbox.service.js';
++import type { AccountDeletedPayload } from '../infrastructure/mail/templates/account-deleted.template.js';
+ import type { RequestUser } from '../common/types/request-user.js';
+ import { Prisma } from '../prisma/generated/client.js';
+ import { PrismaService } from '../prisma/prisma.service.js';
++import { assertAnotherAdmin, lockAdmins } from './admins.js';
+ import { type UpdateUserDto, USER_SELECT } from './dto/user.schemas.js';
+ 
+ type User = Awaited<ReturnType<UsersService['me']>>;
+-type Tx = Prisma.TransactionClient;
+ 
+ // READ COMMITTED, as every transaction that takes a user's lock
+ // (sessions.service.ts): what it reads after a lock is what the transaction
+@@ -18,7 +20,10 @@ const USER_TRANSACTION = { isolationLevel: Prisma.TransactionIsolationLevel.Read
+ export class UsersService {
+   private readonly logger = new Logger(UsersService.name);
+ 
+-  constructor(private readonly prisma: PrismaService) {}
++  constructor(
++    private readonly prisma: PrismaService,
++    private readonly mail: MailOutboxService,
++  ) {}
+ 
+   async me(id: string) {
+     const user = await this.prisma.user.findUnique({ where: { id }, select: USER_SELECT });
+@@ -143,22 +148,36 @@ export class UsersService {
+     this.logger.log(`User ${id} must choose a new password, required by admin ${adminId}`);
+     return user;
+   }
+-}
+-
+-/**
+- * Locks every admin's row, in one order: a change that may leave the project
+- * without an admin who may sign in (a demotion, disabling an account) runs one
+- * at a time, so two admins demoting or disabling each other at once cannot
+- * both succeed, and they wait for each other instead of deadlocking.
+- */
+-async function lockAdmins(tx: Tx): Promise<void> {
+-  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "role" = 'admin' ORDER BY "id" FOR UPDATE`;
+-}
+ 
+-/** 409 unless an admin other than `id` who may sign in remains; under lockAdmins. */
+-async function assertAnotherAdmin(tx: Tx, id: string, refusal: string): Promise<void> {
+-  const others = await tx.user.count({
+-    where: { role: 'admin', disabledAt: null, id: { not: id } },
+-  });
+-  if (others === 0) throw new ConflictException(refusal);
++  /**
++   * An admin deletes another account (their own goes from their account
++   * page, with its password). In one transaction, under the admins' locks and
++   * the account's: the last admin who may sign in stays; the account goes,
++   * with what the schema cascades (sessions, links, queued messages), and a
++   * notice is queued to its address. Its access tokens stop working at once:
++   * the guard finds no account.
++   */
++  async remove(adminId: string, id: string): Promise<void> {
++    if (id === adminId) {
++      throw new ConflictException('Delete your own account from your account page');
++    }
++    const payload: AccountDeletedPayload = { deletedAt: new Date().toISOString(), by: 'admin' };
++    await this.prisma.$transaction(async (tx) => {
++      await lockAdmins(tx);
++      await lockUser(tx, id);
++      const current = await tx.user.findUnique({
++        where: { id },
++        select: { email: true, role: true, disabledAt: true },
++      });
++      if (!current) throw new NotFoundException('User not found');
++      if (current.role === 'admin' && current.disabledAt === null) {
++        await assertAnotherAdmin(tx, id, 'The last admin cannot be deleted');
++      }
++      await tx.user.delete({ where: { id } });
++      // Without the user: the deletion would take the message with it.
++      await this.mail.enqueue(tx, { kind: 'account_deleted', to: current.email, payload });
++    }, USER_TRANSACTION);
++    this.mail.notifyQueued();
++    this.logger.log(`Account ${id} deleted by admin ${adminId}`);
++  }
+ }
+diff --git a/apps/web/performance-budget.json b/apps/web/performance-budget.json
+index 67cf7e7..a7b37f9 100644
+--- a/apps/web/performance-budget.json
++++ b/apps/web/performance-budget.json
+@@ -1,5 +1,5 @@
+ {
+-  "$comment": "Gzip size budgets for the built web assets, checked by `pnpm perf:check` after `pnpm build`. Set from the template's measured build rounded up: the initial JavaScript (every visit: the entry index.html loads and the chunks it preloads, whatever the bundler names them) 108.1 kB, the error tracking chunk (fetched only when WEB_SENTRY_DSN is set) 31 kB, the Web Vitals chunks (fetched after the first render, the library only for sampled page loads) 4.2 kB, the account and admin pages (password recovery and change, sign-up and its confirmation, change of email and its undo, invitations and their acceptance, fetched when opened, with the helpers only they use) 12.2 kB, the focus and error handling of their forms included, an account's page for admins (its role, whether it may sign in, a new password required, fetched when opened from the list of users) 1.7 kB, CSS 0.6 kB. The total keeps a new lazy chunk from hiding outside the named ones; it grew from 145 to 157 kB with the account and admin pages, and to 158 kB with an account's page for admins. Each project sets its own from its performance targets (docs/testing.md#performance-budget).",
++  "$comment": "Gzip size budgets for the built web assets, checked by `pnpm perf:check` after `pnpm build`. Set from the template's measured build rounded up: the initial JavaScript (every visit: the entry index.html loads and the chunks it preloads, whatever the bundler names them) 108.4 kB, the error tracking chunk (fetched only when WEB_SENTRY_DSN is set) 31 kB, the Web Vitals chunks (fetched after the first render, the library only for sampled page loads) 4.2 kB, the account and admin pages (password recovery and change, sign-up and its confirmation, change of email and its undo, deletion of the account, invitations and their acceptance, fetched when opened, with the helpers only they use) 12.5 kB, the focus and error handling of their forms included, an account's page for admins (its role, whether it may sign in, a new password required, its deletion, fetched when opened from the list of users) 1.8 kB, CSS 0.6 kB. The total keeps a new lazy chunk from hiding outside the named ones; it grew from 145 to 157 kB with the account and admin pages, and to 159 kB with an account's page for admins and the deletion of accounts. Each project sets its own from its performance targets (docs/testing.md#performance-budget).",
+   "budgets": [
+     {
+       "name": "JavaScript, initial",
+@@ -29,7 +29,7 @@
+     {
+       "name": "JavaScript, total",
+       "pattern": "\\.js$",
+-      "maxGzipKb": 158
++      "maxGzipKb": 159
+     },
+     {
+       "name": "CSS",
+diff --git a/apps/web/src/api/schema.d.ts b/apps/web/src/api/schema.d.ts
+index 1f6f575..158ef76 100644
+--- a/apps/web/src/api/schema.d.ts
++++ b/apps/web/src/api/schema.d.ts
+@@ -195,6 +195,26 @@ export interface paths {
+         patch?: never;
+         trace?: never;
+     };
++    "/api/account/deletion": {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        get?: never;
++        put?: never;
++        /**
++         * Delete the account, confirming the current password
++         * @description The account and its sessions end at once, this browser's cookies are cleared, and a notice goes to its address. 403: the current password is wrong. 409: the last admin who may sign in cannot be deleted, or the password changed meanwhile.
++         */
++        post: operations["AccountController_deleteAccount"];
++        delete?: never;
++        options?: never;
++        head?: never;
++        patch?: never;
++        trace?: never;
++    };
+     "/api/auth/email-changes/confirm": {
+         parameters: {
+             query?: never;
+@@ -341,7 +361,11 @@ export interface paths {
+         get: operations["UsersController_findOne"];
+         put?: never;
+         post?: never;
+-        delete?: never;
++        /**
++         * Delete an account (admins only)
++         * @description The account and its sessions end at once, and a notice goes to its address. 409: an admin's own account (deleted from the account page, with its password), or the last admin who may sign in.
++         */
++        delete: operations["UsersController_remove"];
+         options?: never;
+         head?: never;
+         /**
+@@ -1087,6 +1111,75 @@ export interface operations {
+             };
+         };
+     };
++    AccountController_deleteAccount: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path?: never;
++            cookie?: never;
++        };
++        requestBody: {
++            content: {
++                "application/json": {
++                    currentPassword: string;
++                };
++            };
++        };
++        responses: {
++            /** @description Deleted */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            /** @description Validation failed */
++            400: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not authenticated */
++            401: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not allowed */
++            403: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Conflict */
++            409: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Rate limit exceeded */
++            429: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++        };
++    };
+     EmailChangeController_confirm: {
+         parameters: {
+             query?: never;
+@@ -1780,6 +1873,80 @@ export interface operations {
+             };
+         };
+     };
++    UsersController_remove: {
++        parameters: {
++            query?: never;
++            header?: never;
++            path: {
++                id: string;
++            };
++            cookie?: never;
++        };
++        requestBody?: never;
++        responses: {
++            /** @description Deleted */
++            204: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content?: never;
++            };
++            /** @description Validation failed */
++            400: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not authenticated */
++            401: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not allowed */
++            403: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Not found */
++            404: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Conflict */
++            409: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++            /** @description Rate limit exceeded */
++            429: {
++                headers: {
++                    [name: string]: unknown;
++                };
++                content: {
++                    "application/json": components["schemas"]["ErrorResponse"];
++                };
++            };
++        };
++    };
+     UsersController_update: {
+         parameters: {
+             query?: never;
+diff --git a/apps/web/src/auth/session.spec.ts b/apps/web/src/auth/session.spec.ts
+index ffd0e2d..037d84e 100644
+--- a/apps/web/src/auth/session.spec.ts
++++ b/apps/web/src/auth/session.spec.ts
+@@ -16,6 +16,7 @@ import {
+   changePassword,
+   clearSession,
+   confirmSignUp,
++  deleteAccount,
+   getAccessToken,
+   getState,
+   refresh,
+@@ -568,6 +569,41 @@ describe('signIn and signOut', () => {
+   });
+ });
+ 
++describe('deleteAccount', () => {
++  const DELETION = 'POST /api/account/deletion';
++
++  it('signs this tab and the others out once the API deleted the account, with nothing to end', async () => {
++    const otherTab = new BroadcastChannel('auth');
++    const heard: unknown[] = [];
++    otherTab.addEventListener('message', ({ data }: MessageEvent<unknown>) => {
++      heard.push(data);
++    });
++    setSession({ accessToken: 'token-1', expiresIn: 900, user: member });
++    const { calls } = stubFetch({ [DELETION]: () => new Response(null, { status: 204 }) });
++
++    await expect(deleteAccount('right')).resolves.toEqual({ ok: true, data: null });
++    expect(getState()).toEqual({ status: 'anonymous', user: null, signedOut: 'deleted' });
++    expect(getAccessToken()).toBeNull();
++    // The API cleared the cookies: no logout follows.
++    expect(calls.map((request) => new URL(request.url).pathname)).toEqual([
++      '/api/account/deletion',
++    ]);
++    expect(await calls[0]?.json()).toEqual({ currentPassword: 'right' });
++    await vi.waitFor(() => {
++      expect(heard).toEqual(['signed-out']);
++    });
++    otherTab.close();
++  });
++
++  it('keeps the session when the API refuses', async () => {
++    setSession({ accessToken: 'token-1', expiresIn: 900, user: member });
++    stubFetch({ [DELETION]: () => failure(403, 'The current password is wrong') });
++    const result = await deleteAccount('wrong');
++    expect(result.ok).toBe(false);
++    expect(getState()).toEqual({ status: 'authenticated', user: member });
++  });
++});
++
+ describe('other tabs', () => {
+   let otherTab: BroadcastChannel;
+   beforeEach(() => {
+diff --git a/apps/web/src/auth/session.ts b/apps/web/src/auth/session.ts
+index 4f43f51..494d0ac 100644
+--- a/apps/web/src/auth/session.ts
++++ b/apps/web/src/auth/session.ts
+@@ -320,6 +320,25 @@ export async function changePassword(
+   return result;
+ }
+ 
++/**
++ * Deletes the account, confirming the current password. The API ended every
++ * session and cleared this browser's cookies: this tab and the others are
++ * signed out at once, with nothing left to end on the server. Like a password
++ * change, it waits for a sign-out or a refresh on its way.
++ */
++export async function deleteAccount(currentPassword: string): Promise<ApiResult<null>> {
++  if (logoutInFlight) await logoutInFlight;
++  if (refreshInFlight) await refreshInFlight;
++  const result = await call(api.POST('/api/account/deletion', { body: { currentPassword } }));
++  if (!result.ok) return result;
++  epoch += 1;
++  accessToken = null;
++  expireSessionHint();
++  emit({ status: 'anonymous', user: null, signedOut: 'deleted' });
++  tellOtherTabs('signed-out');
++  return { ok: true, data: null };
++}
++
+ /**
+  * Signs out: at once in this tab and the others, then on the server. Resolves
+  * false when the server could not be reached. The refresh cookie may then
+diff --git a/apps/web/src/auth/types.ts b/apps/web/src/auth/types.ts
+index d59c4be..c177fa6 100644
+--- a/apps/web/src/auth/types.ts
++++ b/apps/web/src/auth/types.ts
+@@ -12,6 +12,7 @@ export type AuthStatus = 'loading' | 'anonymous' | 'authenticated';
+ export type AuthState =
+   | { status: 'loading'; user: null }
+   // signedOut: the user signed out on this page; 'failed' when the server
+-  // could not be reached to end the session (the sign-in page offers a retry).
+-  | { status: 'anonymous'; user: null; signedOut?: 'done' | 'failed' }
++  // could not be reached to end the session (the sign-in page offers a retry);
++  // 'deleted' when they deleted their account here.
++  | { status: 'anonymous'; user: null; signedOut?: 'done' | 'failed' | 'deleted' }
+   | { status: 'authenticated'; user: AuthUser };
+diff --git a/apps/web/src/auth/useAuth.ts b/apps/web/src/auth/useAuth.ts
+index 1e19e22..310b201 100644
+--- a/apps/web/src/auth/useAuth.ts
++++ b/apps/web/src/auth/useAuth.ts
+@@ -3,6 +3,7 @@ import {
+   acceptInvitation,
+   changePassword,
+   confirmSignUp,
++  deleteAccount,
+   getState,
+   retrySignOut,
+   signIn,
+@@ -18,6 +19,7 @@ export type Auth = AuthState & {
+   changePassword: typeof changePassword;
+   confirmSignUp: typeof confirmSignUp;
+   acceptInvitation: typeof acceptInvitation;
++  deleteAccount: typeof deleteAccount;
+ };
+ 
+ /** Reactive view of the session store: status, user and the actions. */
+@@ -31,5 +33,6 @@ export function useAuth(): Auth {
+     changePassword,
+     confirmSignUp,
+     acceptInvitation,
++    deleteAccount,
+   };
+ }
+diff --git a/apps/web/src/pages/AccountPage.spec.tsx b/apps/web/src/pages/AccountPage.spec.tsx
+index 0578e80..028db11 100644
+--- a/apps/web/src/pages/AccountPage.spec.tsx
++++ b/apps/web/src/pages/AccountPage.spec.tsx
+@@ -1,6 +1,6 @@
+ import { screen, within } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { resetCapabilitiesForTests } from '../auth/capabilities';
+ import { getAccessToken, resetForTests, setSession } from '../auth/session';
+ import { member } from '../test/fixtures';
+@@ -10,6 +10,7 @@ import { renderRoute } from '../test/render';
+ const CHANGE = 'POST /api/account/password';
+ const CHANGE_EMAIL = 'POST /api/account/email';
+ const CAPABILITIES = 'GET /api/auth/capabilities';
++const DELETION = 'POST /api/account/deletion';
+ const routeOf = (request: Request) => `${request.method} ${new URL(request.url).pathname}`;
+ const offers = (emailChange: boolean) => () =>
+   ok({ passwordReset: emailChange, signUp: false, emailChange });
+@@ -25,11 +26,14 @@ afterEach(() => {
+   resetForTests();
+ });
+ 
++/** The password change form: the other forms of the page ask for the current password too. */
++const passwordForm = () => within(screen.getByRole('form', { name: 'Change your password' }));
++
+ async function change(current: string, next: string) {
+   await screen.findByRole('heading', { name: 'Your account' });
+   const user = userEvent.setup();
+-  if (current) await user.type(screen.getByLabelText('Current password'), current);
+-  if (next) await user.type(screen.getByLabelText('New password'), next);
++  if (current) await user.type(passwordForm().getByLabelText('Current password'), current);
++  if (next) await user.type(passwordForm().getByLabelText('New password'), next);
+   await user.click(screen.getByRole('button', { name: 'Change password' }));
+   return user;
+ }
+@@ -50,7 +54,10 @@ describe('AccountPage', () => {
+     await change('', 'short');
+     expect(screen.getByText('Enter your current password.')).toBeInTheDocument();
+     expect(screen.getByText('Use at least 15 characters (5 now).')).toBeInTheDocument();
+-    expect(screen.getByLabelText('Current password')).toHaveAttribute('aria-invalid', 'true');
++    expect(passwordForm().getByLabelText('Current password')).toHaveAttribute(
++      'aria-invalid',
++      'true',
++    );
+     // Only what the deployment offers was asked; no change was sent.
+     expect(calls.map(routeOf)).toEqual([CAPABILITIES]);
+   });
+@@ -84,8 +91,8 @@ describe('AccountPage', () => {
+     });
+     expect(sent?.headers.get('Authorization')).toBe('Bearer token-1');
+     expect(getAccessToken()).toBe('token-2');
+-    expect(screen.getByLabelText('Current password')).toHaveValue('');
+-    expect(screen.getByLabelText('New password')).toHaveValue('');
++    expect(passwordForm().getByLabelText('Current password')).toHaveValue('');
++    expect(passwordForm().getByLabelText('New password')).toHaveValue('');
+   });
+ 
+   it('says when the current password is wrong', async () => {
+@@ -181,3 +188,57 @@ describe('changing the email', () => {
+     expect(scope.getByRole('button', { name: 'Change email' })).toBeEnabled();
+   });
+ });
++
++describe('deleting the account', () => {
++  const deleteForm = () => within(screen.getByRole('form', { name: 'Account deletion' }));
++
++  afterEach(() => {
++    vi.restoreAllMocks();
++  });
++
++  async function remove(password: string) {
++    await screen.findByRole('heading', { name: 'Your account' });
++    const user = userEvent.setup();
++    if (password) await user.type(deleteForm().getByLabelText('Current password'), password);
++    await user.click(screen.getByRole('button', { name: 'Delete my account' }));
++  }
++
++  it('asks for the password and a confirmation before calling the API', async () => {
++    const { calls } = stubFetch({});
++    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
++    renderRoute('/account');
++    await remove('');
++    expect(deleteForm().getByLabelText('Current password')).toHaveAttribute('aria-invalid', 'true');
++    expect(confirm).not.toHaveBeenCalled();
++    await remove(CURRENT);
++    expect(confirm).toHaveBeenCalledWith('Delete your account? This cannot be undone.');
++    expect(calls.some((request) => routeOf(request) === DELETION)).toBe(false);
++  });
++
++  it('deletes it, signs out, and says so on the sign-in page', async () => {
++    stubFetch({ [DELETION]: () => new Response(null, { status: 204 }) });
++    vi.spyOn(window, 'confirm').mockReturnValue(true);
++    renderRoute('/account');
++    await remove(CURRENT);
++    expect(
++      await screen.findByText('Your account was deleted, and every session of it ended.'),
++    ).toBeInTheDocument();
++    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeInTheDocument();
++    expect(getAccessToken()).toBeNull();
++  });
++
++  it('says when the password is wrong, and when the last administrator must stay', async () => {
++    let answer = () => failure(403, 'The current password is wrong');
++    stubFetch({ [DELETION]: () => answer() });
++    vi.spyOn(window, 'confirm').mockReturnValue(true);
++    renderRoute('/account');
++    await remove(CURRENT);
++    expect(await screen.findByText('Your current password is not correct.')).toBeInTheDocument();
++
++    answer = () => failure(409, 'The last admin cannot be deleted');
++    await userEvent.setup().click(screen.getByRole('button', { name: 'Delete my account' }));
++    expect(await screen.findByRole('alert')).toHaveTextContent(
++      'You are the last administrator who can sign in: make another account an admin first.',
++    );
++  });
++});
+diff --git a/apps/web/src/pages/AccountPage.tsx b/apps/web/src/pages/AccountPage.tsx
+index 45c98c6..619c55a 100644
+--- a/apps/web/src/pages/AccountPage.tsx
++++ b/apps/web/src/pages/AccountPage.tsx
+@@ -19,8 +19,8 @@ const NO_ERRORS: FieldErrors = { current: null, next: null };
+ 
+ // The signed-in person's own account: who they are, a new password
+ // (confirmed with the current one; every other session is signed out, this
+-// one carries on in the new session the API answers with), and, where email
+-// works, a new address (confirmed from that address).
++// one carries on in the new session the API answers with), where email
++// works, a new address (confirmed from that address), and its deletion.
+ export function AccountPage() {
+   const auth = useAuth();
+   const capabilities = useCapabilities();
+@@ -114,6 +114,7 @@ export function AccountPage() {
+         </button>
+       </form>
+       {capabilities?.emailChange === true && <ChangeEmailForm currentEmail={user.email} />}
++      <DeleteAccountForm />
+     </section>
+   );
+ }
+@@ -214,3 +215,61 @@ function ChangeEmailForm({ currentEmail }: { currentEmail: string }) {
+     </form>
+   );
+ }
++
++// Deletes the account, with the current password, after a confirmation: it
++// cannot be undone. Every session ends and the sign-in page says so.
++function DeleteAccountForm() {
++  const auth = useAuth();
++  const { formRef, focusInvalid } = useFocusFirstInvalid();
++  const [current, setCurrent] = useState('');
++  const [error, setError] = useState<string | null>(null);
++  const [failure, setFailure] = useState<string | null>(null);
++  const [submitting, setSubmitting] = useState(false);
++
++  async function submit() {
++    const problem = current.length === 0 ? 'Enter your current password.' : null;
++    setError(problem);
++    setFailure(null);
++    if (problem !== null) return;
++    if (!window.confirm('Delete your account? This cannot be undone.')) return;
++    setSubmitting(true);
++    // Signs this tab and the others out once the API answers (src/auth/session.ts).
++    const result = await auth.deleteAccount(current);
++    if (result.ok) return;
++    setSubmitting(false);
++    const { status } = result.failure;
++    if (status === 403) setError('Your current password is not correct.');
++    else if (status === 409) {
++      setFailure(
++        'You are the last administrator who can sign in: make another account an admin first.',
++      );
++    } else setFailure(describeFailure(result.failure));
++  }
++
++  return (
++    <form
++      className="stack auth-form"
++      noValidate
++      aria-labelledby="delete-heading"
++      ref={formRef}
++      onSubmit={(event) => {
++        event.preventDefault();
++        void submit().then(focusInvalid);
++      }}
++    >
++      <h2 id="delete-heading">Account deletion</h2>
++      <p>Your account and its sessions end at once, and your address gets a notice.</p>
++      {failure !== null && <Alert>{failure}</Alert>}
++      <PasswordField
++        label="Current password"
++        autoComplete="current-password"
++        value={current}
++        onChange={setCurrent}
++        error={error}
++      />
++      <button type="submit" disabled={submitting}>
++        {submitting ? 'Deleting…' : 'Delete my account'}
++      </button>
++    </form>
++  );
++}
+diff --git a/apps/web/src/pages/AdminUserPage.spec.tsx b/apps/web/src/pages/AdminUserPage.spec.tsx
+index eb5e0da..59acea5 100644
+--- a/apps/web/src/pages/AdminUserPage.spec.tsx
++++ b/apps/web/src/pages/AdminUserPage.spec.tsx
+@@ -183,4 +183,31 @@ describe('AdminUserPage', () => {
+     ).toBeInTheDocument();
+     expect(screen.queryByRole('button', { name: 'Require a new password' })).toBeNull();
+   });
++
++  it('deletes the account once the admin confirms, and offers nothing more', async () => {
++    stubFetch({
++      [USER]: () => ok(record()),
++      [`DELETE /api/users/${member.id}`]: () => new Response(null, { status: 204 }),
++    });
++    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
++    renderRoute(PAGE);
++    await userEvent
++      .setup()
++      .click(await screen.findByRole('button', { name: 'Delete the account' }));
++    expect(confirm).toHaveBeenCalledWith(`Delete ${member.name}'s account? This cannot be undone.`);
++    expect(
++      await screen.findByText(`${member.name}'s account was deleted, and its address told.`),
++    ).toBeInTheDocument();
++    expect(screen.queryByRole('button', { name: 'Change role' })).toBeNull();
++    expect(screen.getByRole('link', { name: 'All users' })).toBeInTheDocument();
++  });
++
++  it('points an admin to the account page to delete their own account', async () => {
++    stubFetch({ [`GET /api/users/${admin.id}`]: () => ok({ ...record(), ...admin }) });
++    renderRoute(`/admin/users/${admin.id}`);
++    expect(
++      await screen.findByText('Delete your own account from your account page.'),
++    ).toBeInTheDocument();
++    expect(screen.queryByRole('button', { name: 'Delete the account' })).toBeNull();
++  });
+ });
+diff --git a/apps/web/src/pages/AdminUserPage.tsx b/apps/web/src/pages/AdminUserPage.tsx
+index c94f466..4a720dc 100644
+--- a/apps/web/src/pages/AdminUserPage.tsx
++++ b/apps/web/src/pages/AdminUserPage.tsx
+@@ -44,6 +44,8 @@ export function AdminUserPage() {
+   const user = updated?.id === id ? updated : state.kind === 'loaded' ? state.data : null;
+   const [notice, setNotice] = useState<string | null>(null);
+   const [failure, setFailure] = useState<string | null>(null);
++  // Set once the account is deleted: the page says so, and offers nothing more.
++  const [deleted, setDeleted] = useState<string | null>(null);
+ 
+   async function requirePassword(): Promise<void> {
+     setNotice(null);
+@@ -65,6 +67,21 @@ export function AdminUserPage() {
+     }
+   }
+ 
++  async function remove(name: string): Promise<void> {
++    setNotice(null);
++    setFailure(null);
++    const result = await call(api.DELETE('/api/users/{id}', { params: { path: { id } } }));
++    if (result.ok) {
++      setDeleted(`${name}'s account was deleted, and its address told.`);
++    } else if (result.failure.status === 404) {
++      setFailure('This account no longer exists.');
++    } else if (result.failure.status === 409) {
++      setFailure('Delete your own account from your account page.');
++    } else {
++      setFailure(describeFailure(result.failure));
++    }
++  }
++
+   async function change(changes: Changes, done: (user: User) => string): Promise<void> {
+     setNotice(null);
+     setFailure(null);
+@@ -85,6 +102,7 @@ export function AdminUserPage() {
+         <Link to="/admin/users">All users</Link>
+       </p>
+       <h1 id="user-heading">{user?.name ?? 'User'}</h1>
++      {deleted !== null && <Alert tone="info">{deleted}</Alert>}
+       {user === null && state.kind === 'loading' && <p role="status">Loading the account…</p>}
+       {user === null && state.kind === 'failed' && (
+         <LoadFailed
+@@ -93,7 +111,7 @@ export function AdminUserPage() {
+           onRetry={() => void retry()}
+         />
+       )}
+-      {user !== null && (
++      {user !== null && deleted === null && (
+         <>
+           {notice !== null && <Alert tone="info">{notice}</Alert>}
+           {failure !== null && <Alert>{failure}</Alert>}
+@@ -145,6 +163,11 @@ export function AdminUserPage() {
+             own={auth.status === 'authenticated' && auth.user.id === user.id}
+             onRequire={requirePassword}
+           />
++          <DeleteSection
++            user={user}
++            own={auth.status === 'authenticated' && auth.user.id === user.id}
++            onDelete={() => remove(user.name)}
++          />
+         </>
+       )}
+     </section>
+@@ -279,3 +302,38 @@ function PasswordSection({
+     </section>
+   );
+ }
++
++/** Deletes the account after a confirmation: it cannot be undone. */
++function DeleteSection({
++  user,
++  own,
++  onDelete,
++}: {
++  user: User;
++  own: boolean;
++  onDelete: () => Promise<void>;
++}) {
++  const [submitting, setSubmitting] = useState(false);
++  return (
++    <section className="stack" aria-labelledby="delete-heading">
++      <h2 id="delete-heading">Delete the account</h2>
++      {own ? (
++        <p>Delete your own account from your account page.</p>
++      ) : (
++        <button
++          type="button"
++          disabled={submitting}
++          onClick={() => {
++            if (!window.confirm(`Delete ${user.name}'s account? This cannot be undone.`)) return;
++            setSubmitting(true);
++            void onDelete().finally(() => {
++              setSubmitting(false);
++            });
++          }}
++        >
++          Delete the account
++        </button>
++      )}
++    </section>
++  );
++}
+diff --git a/apps/web/src/pages/SignInPage.tsx b/apps/web/src/pages/SignInPage.tsx
+index 58e6134..18d735e 100644
+--- a/apps/web/src/pages/SignInPage.tsx
++++ b/apps/web/src/pages/SignInPage.tsx
+@@ -70,6 +70,9 @@ export function SignInPage() {
+             </button>
+           </Alert>
+         )}
++        {auth.status === 'anonymous' && auth.signedOut === 'deleted' && (
++          <Alert tone="info">Your account was deleted, and every session of it ended.</Alert>
++        )}
+         {failure !== null && <Alert>{failure}</Alert>}
+         <TextField
+           label="Email"
+diff --git a/docs/manual.es.md b/docs/manual.es.md
+index 28de4c8..0b340ad 100644
+--- a/docs/manual.es.md
++++ b/docs/manual.es.md
+@@ -897,6 +897,12 @@ y la dirección anterior recibe un aviso con un enlace que deshace el cambio dur
+ una contraseña nueva. Pruébalo en local con dos direcciones cualesquiera y Mailpit. El diseño:
+ [security.md](security.md#change-of-email).
+ 
++**Eliminar una cuenta.** La página Account ofrece "Account deletion": con la contraseña actual
++y una confirmación, la cuenta y sus sesiones terminan al instante, todas las pestañas cierran
++sesión y (con el correo encendido) la dirección recibe un aviso. Un administrador elimina otra
++cuenta desde su página. Nadie elimina al último administrador que puede iniciar sesión. El
++diseño: [security.md](security.md#account-deletion).
++
+ **Invitaciones.** Con el correo encendido, los administradores ven "Invitations" en el menú
+ superior: una dirección y un rol (member o admin) envían un enlace válido 7 días; la persona lo
+ abre, elige su nombre y contraseña, y queda con la sesión iniciada con ese rol. Las invitaciones
+@@ -905,7 +911,7 @@ invita cualquier dirección y abre el enlace desde Mailpit. El diseño:
+ [security.md](security.md#invitations).
+ 
+ **Administrar cuentas.** En "Users", cada nombre abre la página de la cuenta, donde un
+-administrador cambia su rol, desactiva la cuenta o exige una contraseña nueva. Un rol nuevo
++administrador cambia su rol, desactiva la cuenta, exige una contraseña nueva o la elimina. Un rol nuevo
+ aplica de inmediato: la siguiente página de esa persona ya lo tiene, sin volver a iniciar sesión.
+ Desactivarla (tras una confirmación) cierra todas sus sesiones al instante, y no puede iniciar
+ sesión ni recuperar la contraseña hasta que la cuenta se active de nuevo. Exigir una contraseña
+diff --git a/docs/manual.md b/docs/manual.md
+index 1c19837..c7fa014 100644
+--- a/docs/manual.md
++++ b/docs/manual.md
+@@ -865,6 +865,12 @@ opened; then every session is signed out (sign in with the new address), and the
+ gets a notice with a link that undoes the change for 7 days, asking for a new password. Try it
+ locally with any two addresses and Mailpit. The design: [security.md](security.md#change-of-email).
+ 
++**Deleting an account.** The Account page offers "Account deletion": with the current password
++and a confirmation, the account and its sessions end at once, every tab is signed out, and (with
++email on) the address gets a notice. An administrator deletes another account from its page.
++Nobody deletes the last administrator who can sign in. The design:
++[security.md](security.md#account-deletion).
++
+ **Invitations.** With email on, administrators see "Invitations" in the top menu: an address and
+ a role (member or admin) send a link valid for 7 days; the person opens it, chooses their name and
+ password, and is signed in with that role. Pending invitations can be sent again or revoked. Try
+@@ -872,7 +878,7 @@ it locally: sign in as `admin@example.com`, invite any address, and open the lin
+ design: [security.md](security.md#invitations).
+ 
+ **Managing accounts.** On "Users", each name opens the account's page, where an administrator
+-changes its role, disables the account or requires a new password. A new role applies at once:
++changes its role, disables the account, requires a new password or deletes the account. A new role applies at once:
+ the person's next page already has it, without signing in again. Disabling (after a confirmation)
+ signs the person out everywhere at once, and they cannot sign in, nor recover the password, until
+ the account is enabled again. Requiring a new password (with email on) also signs them out; their
+diff --git a/docs/security.md b/docs/security.md
+index 4754602..90de5a1 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -260,6 +260,20 @@ sends a reset link (the outbox limits how many), which says an administrator ask
+ reset, or a password change, clears it. It needs email: without it the person cannot choose the
+ new password.
+ 
++### Account deletion
++
++A person deletes their own account from the Account page (`POST /api/account/deletion`, with the
++current password, limited like a sign-in, after a confirmation); an admin deletes another one from
++its page (`DELETE /api/users/:id`). In one transaction, under the admins' locks for an admin and
++the account's lock, the row goes and the schema cascades the rest: sessions, one-time links and
++queued messages go with it, and invitations it sent keep no sender. The last admin who may sign
++in cannot be deleted, so two admins deleting each other at once cannot both succeed. A notice is
++queued to the former address (`account_deleted`, queued without the user, as the deletion would
++take it along); it carries no link, and tells the owner what to do if they did not delete it. The
++account's access tokens stop at once (the guard finds no account), the browser's cookies are
++cleared, and every tab is signed out. What the application keeps elsewhere about the person
++(logs, backups, other systems) is the project's to erase: see the privacy notice it publishes.
++
+ ### Web client
+ 
+ - **401 handling** (`web/src/auth/middleware.ts`): a 401 to a request that carried a token
+diff --git a/e2e/users.e2e.ts b/e2e/users.e2e.ts
+index 23213d8..f62e181 100644
+--- a/e2e/users.e2e.ts
++++ b/e2e/users.e2e.ts
+@@ -93,6 +93,50 @@ test('an administrator disables an account: the person is signed out and cannot
+   await theirs.close();
+ });
+ 
++test('a person deletes their own account: signed out, told so, and it cannot sign in again', async ({
++  page,
++}) => {
++  const person = createAccount('Annie Easley');
++  await signIn(page, person.email, person.password);
++  await expect(page.getByRole('heading', { name: `Welcome, ${person.name}` })).toBeVisible();
++  await page.getByRole('link', { name: 'Account' }).click();
++  const form = page.getByRole('form', { name: 'Account deletion' });
++  await form.getByLabel('Current password', { exact: true }).fill(person.password);
++  page.once('dialog', (dialog) => void dialog.accept());
++  await form.getByRole('button', { name: 'Delete my account' }).click();
++
++  await expect(page).toHaveURL(/\/sign-in$/);
++  await expect(
++    page.getByRole('status').filter({ hasText: 'Your account was deleted' }),
++  ).toBeVisible();
++  await signIn(page, person.email, person.password);
++  await expect(page.getByRole('alert')).toHaveText('Invalid email or password.');
++});
++
++test('an administrator deletes an account: the person is signed out at once', async ({
++  page,
++  browser,
++}) => {
++  const person = createAccount('Evelyn Boyd Granville');
++  const theirs = await browser.newContext();
++  const theirPage = await theirs.newPage();
++  await signIn(theirPage, person.email, person.password);
++  await expect(theirPage.getByRole('heading', { name: `Welcome, ${person.name}` })).toBeVisible();
++
++  await signIn(page, ADMIN.email, ADMIN.password);
++  await expect(page.getByRole('heading', { name: 'Welcome, Admin' })).toBeVisible();
++  await openAccount(page, person);
++  page.once('dialog', (dialog) => void dialog.accept());
++  await page.getByRole('button', { name: 'Delete the account' }).click();
++  await expect(
++    page.getByRole('status').filter({ hasText: `${person.name}'s account was deleted` }),
++  ).toBeVisible();
++
++  await theirPage.reload();
++  await expect(theirPage).toHaveURL(/\/sign-in$/);
++  await theirs.close();
++});
++
+ test.describe('with email', () => {
+   test.skip(withoutMailpit, 'No Mailpit: email is off (pnpm services:up starts one)');
+ 
+diff --git a/openapi/openapi.json b/openapi/openapi.json
+index 9f0b66c..bcc2155 100644
+--- a/openapi/openapi.json
++++ b/openapi/openapi.json
+@@ -1011,6 +1011,97 @@
+         ]
+       }
+     },
++    "/api/account/deletion": {
++      "post": {
++        "description": "The account and its sessions end at once, this browser's cookies are cleared, and a notice goes to its address. 403: the current password is wrong. 409: the last admin who may sign in cannot be deleted, or the password changed meanwhile.",
++        "operationId": "AccountController_deleteAccount",
++        "parameters": [],
++        "requestBody": {
++          "required": true,
++          "content": {
++            "application/json": {
++              "schema": {
++                "type": "object",
++                "properties": {
++                  "currentPassword": {
++                    "type": "string",
++                    "minLength": 1,
++                    "maxLength": 400
++                  }
++                },
++                "required": [
++                  "currentPassword"
++                ]
++              }
++            }
++          }
++        },
++        "responses": {
++          "204": {
++            "description": "Deleted"
++          },
++          "400": {
++            "description": "Validation failed",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "401": {
++            "description": "Not authenticated",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "403": {
++            "description": "Not allowed",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "409": {
++            "description": "Conflict",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "429": {
++            "description": "Rate limit exceeded",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          }
++        },
++        "security": [
++          {
++            "bearer": []
++          }
++        ],
++        "summary": "Delete the account, confirming the current password",
++        "tags": [
++          "account"
++        ]
++      }
++    },
+     "/api/auth/email-changes/confirm": {
+       "post": {
+         "description": "The token works once, while the account is as it was when the link was sent. The address changes, every session ends (sign in again with the new address), and the previous address gets a notice with a link to undo it. 404: the link is invalid, used or expired. 409: the new address got an account meanwhile.",
+@@ -2359,6 +2450,95 @@
+         "tags": [
+           "users"
+         ]
++      },
++      "delete": {
++        "description": "The account and its sessions end at once, and a notice goes to its address. 409: an admin's own account (deleted from the account page, with its password), or the last admin who may sign in.",
++        "operationId": "UsersController_remove",
++        "parameters": [
++          {
++            "name": "id",
++            "required": true,
++            "in": "path",
++            "schema": {
++              "type": "string",
++              "format": "uuid"
++            }
++          }
++        ],
++        "responses": {
++          "204": {
++            "description": "Deleted"
++          },
++          "400": {
++            "description": "Validation failed",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "401": {
++            "description": "Not authenticated",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "403": {
++            "description": "Not allowed",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "404": {
++            "description": "Not found",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "409": {
++            "description": "Conflict",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          },
++          "429": {
++            "description": "Rate limit exceeded",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ErrorResponse"
++                }
++              }
++            }
++          }
++        },
++        "security": [
++          {
++            "bearer": []
++          }
++        ],
++        "summary": "Delete an account (admins only)",
++        "tags": [
++          "users"
++        ]
+       }
+     },
+     "/api/users/{id}/require-password-change": {

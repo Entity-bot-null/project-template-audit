@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 18:07:08 -0600
+Subject: [PATCH 1/4] fix(api): make request ids from the system's
+ cryptographic source
+
+X-Request-Id came from Math.random, whose sequence is predictable: two
+installations could repeat each other's ids, and anyone who saw a few
+could guess the next ones. It now takes 128 bits from the system's
+cryptographic source through expo-crypto, an Expo SDK module (installed
+with `expo install`; 57.0.3, as 57.0.4 fails the supply-chain policy's
+trust check). It is a native module: the next release is a store build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ docs/MOBILE_ARCHITECTURE.md | 16 ++++++++--------
+ package.json                |  1 +
+ pnpm-lock.yaml              | 12 ++++++++++++
+ src/api/http.spec.ts        |  9 +++++++++
+ src/api/http.ts             | 18 ++++++++++--------
+ src/test/setup.ts           |  8 ++++++++
+ 6 files changed, 48 insertions(+), 16 deletions(-)
+
+diff --git a/docs/MOBILE_ARCHITECTURE.md b/docs/MOBILE_ARCHITECTURE.md
+index 93c4a6d..5c29010 100644
+--- a/docs/MOBILE_ARCHITECTURE.md
++++ b/docs/MOBILE_ARCHITECTURE.md
+@@ -215,14 +215,14 @@ const item = await unwrapWith(api.GET('/api/items/{id}', { params: { path: { id
+ 
+ `src/api/http.ts`, used by both clients:
+ 
+-| Behavior       | Detail                                                                                         |
+-| -------------- | ---------------------------------------------------------------------------------------------- |
+-| Timeout        | 15 s per request, as an `AppError` of kind `timeout`                                           |
+-| Cancellation   | the caller's `AbortSignal` (TanStack Query cancels queries nobody needs) → kind `cancelled`    |
+-| Request id     | a random `X-Request-Id` on every request: a failure a user reports can be found in server logs |
+-| Authentication | the session's access token; after a 401, exactly one replay with a renewed token               |
+-| Errors         | network failures become kind `network`; HTTP statuses are read by `unwrap()` with the body     |
+-| Breadcrumbs    | method, path (no query string, no body) and status of failures, for error reports              |
++| Behavior       | Detail                                                                                                         |
++| -------------- | -------------------------------------------------------------------------------------------------------------- |
++| Timeout        | 15 s per request, as an `AppError` of kind `timeout`                                                           |
++| Cancellation   | the caller's `AbortSignal` (TanStack Query cancels queries nobody needs) → kind `cancelled`                    |
++| Request id     | a random `X-Request-Id` on every request (`expo-crypto`): a failure a user reports can be found in server logs |
++| Authentication | the session's access token; after a 401, exactly one replay with a renewed token                               |
++| Errors         | network failures become kind `network`; HTTP statuses are read by `unwrap()` with the body                     |
++| Breadcrumbs    | method, path (no query string, no body) and status of failures, for error reports                              |
+ 
+ Plain HTTP is accepted only for local development hosts (validated by `src/config/env.schema.ts`);
+ production requires HTTPS, and Android release builds refuse cleartext traffic except in the E2E
+diff --git a/package.json b/package.json
+index 72ac993..4eb101c 100644
+--- a/package.json
++++ b/package.json
+@@ -49,6 +49,7 @@
+     "expo-application": "~57.0.3",
+     "expo-build-properties": "~57.0.0",
+     "expo-constants": "~57.0.20",
++    "expo-crypto": "~57.0.3",
+     "expo-dev-client": "~57.0.0",
+     "expo-device": "~57.0.0",
+     "expo-font": "~57.0.4",
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index e0be56c..daa6a17 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -197,6 +197,9 @@ importers:
+       expo-constants:
+         specifier: ~57.0.20
+         version: 57.0.20(expo@57.0.26)(react-native@0.86.3(@babel/core@7.29.7(supports-color@10.2.2))(@react-native/jest-preset@0.86.3(@babel/core@7.29.7(supports-color@10.2.2))(react@19.2.3)(supports-color@10.2.2))(@react-native/metro-config@0.87.1(@babel/core@7.29.7(supports-color@10.2.2))(supports-color@10.2.2))(@types/react@19.2.18)(react@19.2.3)(supports-color@10.2.2))(supports-color@10.2.2)
++      expo-crypto:
++        specifier: ~57.0.3
++        version: 57.0.3(expo@57.0.26)
+       expo-dev-client:
+         specifier: ~57.0.0
+         version: 57.0.19(expo@57.0.26)(react-native@0.86.3(@babel/core@7.29.7(supports-color@10.2.2))(@react-native/jest-preset@0.86.3(@babel/core@7.29.7(supports-color@10.2.2))(react@19.2.3)(supports-color@10.2.2))(@react-native/metro-config@0.87.1(@babel/core@7.29.7(supports-color@10.2.2))(supports-color@10.2.2))(@types/react@19.2.18)(react@19.2.3)(supports-color@10.2.2))
+@@ -3137,6 +3140,11 @@ packages:
+       expo: '*'
+       react-native: '*'
+ 
++  expo-crypto@57.0.3:
++    resolution: {integrity: sha512-SAWqEfF37nc8ot7bXsVmu9AFYwQdC2kGvH/eNAHiR3bmlcf1Vv8wu9AnGKT+a90r3T8YfwMpZP4QAYlo4vCn9w==}
++    peerDependencies:
++      expo: '*'
++
+   expo-dev-client@57.0.19:
+     resolution: {integrity: sha512-7giMK6BLL685GECHem2UAQvS473ImZLi5l+Q5tq+XSyv6I9UNVPs0p07mKwgBzq8z7DR3d4nTl702ziFxTjO3Q==}
+     peerDependencies:
+@@ -9398,6 +9406,10 @@ snapshots:
+     transitivePeerDependencies:
+       - supports-color
+ 
++  expo-crypto@57.0.3(expo@57.0.26):
++    dependencies:
++      expo: 57.0.26(a9540223d47e019a5a980305a14baf0c)
++
+   expo-dev-client@57.0.19(expo@57.0.26)(react-native@0.86.3(@babel/core@7.29.7(supports-color@10.2.2))(@react-native/jest-preset@0.86.3(@babel/core@7.29.7(supports-color@10.2.2))(react@19.2.3)(supports-color@10.2.2))(@react-native/metro-config@0.87.1(@babel/core@7.29.7(supports-color@10.2.2))(supports-color@10.2.2))(@types/react@19.2.18)(react@19.2.3)(supports-color@10.2.2)):
+     dependencies:
+       expo: 57.0.26(a9540223d47e019a5a980305a14baf0c)
+diff --git a/src/api/http.spec.ts b/src/api/http.spec.ts
+index 31bac6a..1f032bd 100644
+--- a/src/api/http.spec.ts
++++ b/src/api/http.spec.ts
+@@ -33,6 +33,15 @@ describe('createHttp', () => {
+     expect(sent?.headers.has('Authorization')).toBe(false);
+   });
+ 
++  it('makes a new request id for every request', async () => {
++    const fetch = jest.fn((_request: Request) => Promise.resolve(respond(200)));
++    const send = createHttp({ fetch });
++    await send(request());
++    await send(request());
++    const ids = fetch.mock.calls.map(([sent]) => sent.headers.get(REQUEST_ID_HEADER));
++    expect(new Set(ids).size).toBe(2);
++  });
++
+   it("keeps a caller's request id", async () => {
+     const fetch = jest.fn((_request: Request) => Promise.resolve(respond(200)));
+     await createHttp({ fetch })(request('/x', { headers: { [REQUEST_ID_HEADER]: 'abc' } }));
+diff --git a/src/api/http.ts b/src/api/http.ts
+index 02481aa..4962d71 100644
+--- a/src/api/http.ts
++++ b/src/api/http.ts
+@@ -1,3 +1,5 @@
++import { getRandomValues } from 'expo-crypto';
++
+ import { AppError } from '@/lib/errors';
+ import { addBreadcrumb } from '@/lib/observability/errorReporter';
+ 
+@@ -128,13 +130,13 @@ function isAborted(signal: AbortSignal): boolean {
+   return signal.aborted;
+ }
+ 
+-/** 128 random bits as hex: unique enough to find one request in the logs. */
++/**
++ * 128 random bits as hex, from the system's cryptographic source (not
++ * Math.random, whose sequence is predictable): unique enough to find one
++ * request in the logs.
++ */
+ function newRequestId(): string {
+-  let id = '';
+-  for (let index = 0; index < 4; index += 1) {
+-    id += Math.floor(Math.random() * 0x100000000)
+-      .toString(16)
+-      .padStart(8, '0');
+-  }
+-  return id;
++  return Array.from(getRandomValues(new Uint8Array(16)), (byte) =>
++    byte.toString(16).padStart(2, '0'),
++  ).join('');
+ }
+diff --git a/src/test/setup.ts b/src/test/setup.ts
+index c4d5f81..2a4ad58 100644
+--- a/src/test/setup.ts
++++ b/src/test/setup.ts
+@@ -53,6 +53,14 @@ jest.mock('expo-sqlite/kv-store', () => {
+   return { __esModule: true, default: storage };
+ });
+ 
++// expo-crypto's random source, from Node's: real randomness, as on a phone.
++jest.mock('expo-crypto', () => ({
++  getRandomValues: <T extends Uint8Array>(bytes: T): T =>
++    jest
++      .requireActual<{ getRandomValues: <A extends Uint8Array>(bytes: A) => A }>('node:crypto')
++      .getRandomValues(bytes),
++}));
++
+ jest.mock('expo-network', () => ({
+   addNetworkStateListener: jest.fn(() => ({ remove: jest.fn() })),
+   getNetworkStateAsync: jest.fn(() =>

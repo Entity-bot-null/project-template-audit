@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "refused",
+        "unsupported"
+      ]
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "additionalProperties": false,
+  "$id": "https://audit-hub.invalid/schema/v1/webhook-reply.schema.json",
+  "title": "WebhookReply"
+}
