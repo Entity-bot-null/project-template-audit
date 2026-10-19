@@ -1,6 +1,6 @@
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetCapabilitiesForTests } from '../auth/capabilities';
 import { clearSession, resetForTests, setSession } from '../auth/session';
 import { member } from '../test/fixtures';
@@ -53,7 +53,11 @@ describe('SignUpPage', () => {
       'href',
       '/sign-in',
     );
-    expect(calls.map((call) => call.method)).toEqual(['GET']);
+    // The notice is up from the first render, before the capabilities are
+    // asked for: wait for that one request, and see it is the only one.
+    await vi.waitFor(() => {
+      expect(calls.map((call) => call.method)).toEqual(['GET']);
+    });
   });
 
   it('checks every field before calling the API', async () => {
