@@ -1,0 +1,188 @@
+# Local development: `pnpm dev` starts PostgreSQL and Mailpit (`pnpm services:up`),
+# then the API and the web app on the host. `pnpm db:up` starts PostgreSQL alone.
+#
+# Optional services, started only when asked for (docs/architecture.md):
+#   docker compose --profile redis up -d           Redis (REDIS_PASSWORD in the root .env)
+#   docker compose --profile observability up -d   OpenTelemetry backend + Grafana (development)
+#
+# Production-like stack built from the Dockerfiles (profile "stack"):
+# migrations, then the API, behind the web server at http://localhost:8180.
+#   docker compose --profile stack up --build
+# Reads JWT_ACCESS_SECRET from a root .env (see .env.example). Not a
+# deployment: no TLS, local credentials, nothing published beyond loopback.
+services:
+  db:
+    # Pinned by digest, the same as CI's (.github/tool-images/Dockerfile);
+    # Dependabot proposes updates.
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      # Local development only. Published on loopback only.
+      POSTGRES_PASSWORD: app
+    ports:
+      - '127.0.0.1:${DB_PORT:-5452}:5432'
+    volumes:
+      - db_data:/var/lib/postgresql
+    healthcheck:
+      # TCP on purpose: during the first initdb the server listens on the
+      # Unix socket only, which would pass a socket check and then restart.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  # Development mail catcher (docs/manual.md#115-email): every
+  # message the API sends locally lands here, nothing leaves the machine. Its
+  # web UI lists them; the integration specs read them through its API.
+  # Published on loopback only, and never part of a deployment: it accepts
+  # mail from anyone who can reach it, without authentication or TLS, so the
+  # API refuses an SMTP server without TLS in production (MAIL_SMTP_URL).
+  # Messages live in memory: they are gone after `docker compose down`.
+  # Chaos (MP_ENABLE_CHAOS) only arms Mailpit's API to inject SMTP errors on
+  # demand (the outbox specs do, then disarm it); nothing fails until asked.
+  mailpit:
+    image: axllent/mailpit:v1.31.4@sha256:b68349e3a014b90c5610bfb26b2ae36f3892d7b8cf25ee140c6c71c98d2fcf48
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_ENABLE_CHAOS: 'true'
+      MP_SMTP_DISABLE_RDNS: 'true'
+    ports:
+      - '127.0.0.1:${MAILPIT_SMTP_PORT:-1045}:1025'
+      - '127.0.0.1:${MAILPIT_UI_PORT:-8045}:8025'
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  migrate:
+    profiles: [stack]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: migrate
+    environment:
+      DATABASE_URL: postgresql://app:app@db:5432/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    profiles: [stack]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        APP_RELEASE: ${APP_RELEASE:-local}
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://app:app@db:5432/app
+      # One proxy hop: the web container, which replaces X-Forwarded-For.
+      TRUST_PROXY: '1'
+      # Empty when unset: the API then refuses to boot and names the variable.
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-}
+      # Encrypts Audit Hub's stored secrets (docs/adr/0006); required like the one above.
+      AUDIT_SECRETS_KEY: ${AUDIT_SECRETS_KEY:-}
+      # Signs the audit log's integrity seals (docs/adr/0008); required like the ones above.
+      AUDIT_INTEGRITY_KEY: ${AUDIT_INTEGRITY_KEY:-}
+      APP_ENVIRONMENT: stack
+      # Optional integrations, off unless set in the root .env (.env.example):
+      # with the redis profile, STACK_REDIS_URL=redis://:<REDIS_PASSWORD>@redis:6379;
+      # with the observability profile, STACK_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4318.
+      REDIS_URL: ${STACK_REDIS_URL:-}
+      RATE_LIMIT_STORE: ${STACK_RATE_LIMIT_STORE:-memory}
+      CACHE_STORE: ${STACK_CACHE_STORE:-memory}
+      SENTRY_DSN: ${STACK_SENTRY_DSN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${STACK_OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      # Only when the redis profile is active.
+      redis:
+        condition: service_healthy
+        required: false
+
+  web:
+    profiles: [stack]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        APP_RELEASE: ${APP_RELEASE:-local}
+    environment:
+      API_UPSTREAM: http://api:3000
+      APP_ENVIRONMENT: stack
+      WEB_SENTRY_DSN: ${STACK_WEB_SENTRY_DSN:-}
+    ports:
+      - '127.0.0.1:${WEB_PORT:-8180}:8080'
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Optional: Redis for shared rate limits, cache, locks and idempotency
+  # (docs/architecture.md#redis). The application runs without it.
+  # Secure defaults: a password is required (REDIS_PASSWORD in the root .env,
+  # never committed), it is published on loopback only, runs as the redis
+  # user, keeps its data (AOF, fsync every second) and evicts only keys that
+  # have a TTL when full: every key the template writes has one, so future keys
+  # without a TTL (queues) are never dropped. `exec` makes redis-server PID 1:
+  # SIGTERM reaches it and it saves before exiting.
+  redis:
+    profiles: [redis]
+    image: redis:8-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    restart: unless-stopped
+    user: redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - |
+        test -n "$$REDIS_PASSWORD" || { echo 'REDIS_PASSWORD is empty: set it in the root .env (openssl rand -hex 24)' >&2; exit 1; }
+        printf 'requirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf
+        exec redis-server /tmp/redis.conf --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy volatile-lru
+    ports:
+      - '127.0.0.1:${REDIS_PORT:-6389}:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      # The password reaches redis-cli through its environment, not its arguments.
+      test: ['CMD-SHELL', 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    stop_grace_period: 10s
+
+  # Optional, development only: an OpenTelemetry backend on this machine
+  # (collector, Prometheus, Tempo, Loki and Grafana in one image), to see the
+  # API's traces and metrics before choosing a provider. Then, in
+  # apps/api/.env: OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4328, and
+  # Grafana at http://localhost:3201 (anonymous admin: loopback only, never
+  # deploy this service). docs/observability.md#local-backend.
+  # The dashboards and the alert rules of observability/ are mounted read-only:
+  # Grafana shows the dashboards in its "Application" folder and Prometheus
+  # evaluates the rules (docs/observability.md#dashboards-and-alerts-as-code).
+  otel-lgtm:
+    profiles: [observability]
+    image: grafana/otel-lgtm:0.34.0@sha256:b966ea107831d526d9eb8fe4d2d86c9e5731392fad9dce8296bcf2072031f07c
+    ports:
+      - '127.0.0.1:${OTLP_HTTP_PORT:-4328}:4318'
+      - '127.0.0.1:${GRAFANA_PORT:-3201}:3000'
+      - '127.0.0.1:${PROMETHEUS_PORT:-9190}:9090'
+    volumes:
+      - ./observability/prometheus/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      - ./observability/prometheus/rules:/otel-lgtm/rules:ro
+      - ./observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/application.yaml:ro
+      - ./observability/grafana/dashboards:/otel-lgtm/application-dashboards:ro
+
+volumes:
+  db_data:
+  redis_data:

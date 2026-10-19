@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "sourceSeq": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "duplicate",
+              "rejected"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "schema_invalid",
+              "too_large",
+              "action_unknown",
+              "catalog_version_unknown",
+              "details_invalid",
+              "category_mismatch",
+              "category_reserved",
+              "outcome_not_allowed",
+              "source_not_allowed",
+              "occurred_at_too_old",
+              "sequence_conflict",
+              "contract_version_unsupported"
+            ]
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "truncatedFields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "droppedFields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "index",
+          "status"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "accepted": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "duplicates": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "rejected": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "required": [
+    "results",
+    "accepted",
+    "duplicates",
+    "rejected"
+  ],
+  "additionalProperties": false,
+  "$id": "https://audit-hub.invalid/schema/v1/event-batch-result.schema.json",
+  "title": "EventBatchResult"
+}

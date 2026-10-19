@@ -1,0 +1,64 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output (dist-dev: what `pnpm dev` runs, apart from the builds)
+dist/
+dist-dev/
+*.tsbuildinfo
+
+# Generated at install/build time (prisma generate)
+apps/api/src/prisma/generated/
+
+# Test output and reports
+coverage/
+playwright-report/
+test-results/
+blob-report/
+
+# Environment: only the examples are committed
+.env
+.env.*
+!.env.example
+*.env
+.envrc
+
+# Terraform (infra/terraform): the state holds every password of an
+# environment, .terraform/ the downloaded providers, and the variable and
+# backend files one environment's values; only their examples, the tests'
+# synthetic values and the lock file are committed.
+*.tfstate*
+.terraform/
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!infra/terraform/*/tests/*.tfvars
+*.tfplan
+backend.hcl
+crash.log
+crash.*.log
+
+# Logs
+*.log
+logs/
+
+# Whole-repository dumps for AI tools (Repomix and the like): stale copies of
+# the code, local .env values included. Never committed.
+repomix-output.*
+
+# Local state of code-intelligence tools (Serena's project index and memories,
+# codebase-memory's persisted graph): per machine, never committed.
+.serena/
+.codebase-memory/
+
+# OS and editors (the shared VS Code settings are committed)
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# The connected example projects, generated from the pinned templates
+# (scripts/examples.mjs, docs/adr/0010): each is its own project.
+.examples/

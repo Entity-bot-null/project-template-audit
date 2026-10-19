@@ -1,0 +1,6 @@
+{
+  "$comment": "The template the app example is generated from (docs/adr/0010): bump the commit in a pull request that shows the template's diff.",
+  "repository": "https://github.com/Entity-bot-null/project-template-app",
+  "commit": "d914c7c2c86b67c72e74328dbd9178f17923de74",
+  "connector": "expo"
+}

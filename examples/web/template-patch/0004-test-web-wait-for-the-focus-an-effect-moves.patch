@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 17:04:34 -0600
+Subject: [PATCH 04/10] test(web): wait for the focus an effect moves
+
+FocusHeading and useFocusFirstInvalid move the focus in an effect.
+Outside act(), React runs passive effects after it paints, so a findBy*
+can see the new view before the focus has moved: three assertions of
+ResetPasswordPage.spec.tsx and SignUpPage.spec.tsx failed now and then
+under load. They now wait for the focus itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/web/src/pages/ResetPasswordPage.spec.tsx | 12 +++++++++---
+ apps/web/src/pages/SignUpPage.spec.tsx        |  7 +++++--
+ 2 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/apps/web/src/pages/ResetPasswordPage.spec.tsx b/apps/web/src/pages/ResetPasswordPage.spec.tsx
+index 2d8f4fd..7c44462 100644
+--- a/apps/web/src/pages/ResetPasswordPage.spec.tsx
++++ b/apps/web/src/pages/ResetPasswordPage.spec.tsx
+@@ -1,4 +1,4 @@
+-import { act, screen } from '@testing-library/react';
++import { act, screen, waitFor } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+ import { clearSession, getState, resetForTests, setSession } from '../auth/session';
+@@ -170,9 +170,15 @@ describe('ResetPasswordPage', () => {
+     stubFetch({ [CONFIRM]: done });
+     renderRoute(LINK);
+     await choose('short');
+-    expect(screen.getByLabelText('New password')).toHaveFocus();
++    // Moved by an effect, which may run after the view is on the screen.
++    await waitFor(() => {
++      expect(screen.getByLabelText('New password')).toHaveFocus();
++    });
+     await userEvent.setup().type(screen.getByLabelText('New password'), ' violet harbour lantern');
+     await userEvent.setup().click(screen.getByRole('button', { name: 'Save the new password' }));
+-    expect(await screen.findByRole('heading', { name: 'Password changed' })).toHaveFocus();
++    const heading = await screen.findByRole('heading', { name: 'Password changed' });
++    await waitFor(() => {
++      expect(heading).toHaveFocus();
++    });
+   });
+ });
+diff --git a/apps/web/src/pages/SignUpPage.spec.tsx b/apps/web/src/pages/SignUpPage.spec.tsx
+index a7640df..f97b28f 100644
+--- a/apps/web/src/pages/SignUpPage.spec.tsx
++++ b/apps/web/src/pages/SignUpPage.spec.tsx
+@@ -1,4 +1,4 @@
+-import { screen } from '@testing-library/react';
++import { screen, waitFor } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+ import { clearSession, resetForTests, setSession } from '../auth/session';
+@@ -73,7 +73,10 @@ describe('SignUpPage', () => {
+     renderRoute('/sign-up');
+     await signUp({ email: 'a..b@example.com' });
+     expect(await screen.findByText('Enter a valid email.')).toBeInTheDocument();
+-    expect(screen.getByLabelText('Email')).toHaveFocus();
++    // Moved by an effect, which may run after the message is on the screen.
++    await waitFor(() => {
++      expect(screen.getByLabelText('Email')).toHaveFocus();
++    });
+     expect(screen.queryByText(/Choose another password/)).toBeNull();
+   });
+ 

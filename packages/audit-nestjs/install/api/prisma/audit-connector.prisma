@@ -1,0 +1,85 @@
+// audit-connector:begin (pnpm connector add; docs/audit/connection-guide.md)
+// Audit Hub connector: an event is written here in the transaction of the
+// change it describes, and forwarded by the worker in src/audit; deleted
+// once Audit Hub answered for it. Holds personal data (IP, user agent) only
+// until then. CHECK constraints and partial indexes in the migration.
+model AuditOutbox {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  eventId       String    @unique @map("event_id") @db.Uuid
+  // Null until the forwarder numbers the row: gapless, in id order.
+  sourceSeq     BigInt?   @unique @map("source_seq")
+  payload       Json
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  lockedUntil   DateTime? @map("locked_until") @db.Timestamptz(3)
+  // Category of the last failure (unreachable, http_503, rejected_retryable…).
+  lastError     String?   @map("last_error")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@map("audit_outbox")
+}
+
+// The sequence counter (a single row), moved in the numbering's transaction:
+// a rollback gives the numbers back. A new epoch starts when the row is
+// created again (a restored database).
+model AuditOutboxState {
+  id        Int      @id @default(1)
+  epoch     String   @db.Uuid
+  lastSeq   BigInt   @default(0) @map("last_seq")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("audit_outbox_state")
+}
+
+// Webhook deliveries of Audit Hub already handled (Audit-Webhook-Id), for a day.
+model AuditWebhookReceipt {
+  id         String   @id @db.Uuid
+  type       String
+  receivedAt DateTime @default(now()) @map("received_at") @db.Timestamptz(3)
+
+  @@index([receivedAt])
+  @@map("audit_webhook_receipts")
+}
+
+// "Was it you?": one row per suspicious sign-in Audit Hub reported. The user
+// answers in the app; an answer is final.
+model AuditSecurityPrompt {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  webhookId  String    @unique @map("webhook_id") @db.Uuid
+  hubEventId String    @map("hub_event_id") @db.Uuid
+  signals    String[]
+  // Country, city, client type, device model: never an IP.
+  context    Json
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  answer     String?
+  answeredAt DateTime? @map("answered_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@map("audit_security_prompts")
+}
+
+// The phones "Was it you?" is pushed to (the push module, AUDIT_HUB_PUSH):
+// Expo push tokens, one account each. Gone with the account, at sign-out on
+// that phone, or when Expo's push service no longer knows them.
+model AuditPushToken {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  token     String   @unique @db.VarChar(255)
+  platform  String   @db.VarChar(16)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("audit_push_tokens")
+}
+// audit-connector:end

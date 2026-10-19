@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  // As in the web app it is installed into (apps/web/tsconfig.app.json):
+  // bundler resolution, imports without an extension, type imports kept apart.
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["node"]
+  },
+  "include": ["src", "*.ts"]
+}

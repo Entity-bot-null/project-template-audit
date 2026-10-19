@@ -1,0 +1,387 @@
+name: Deploy
+run-name: Deploy ${{ inputs.ref }} to ${{ inputs.environment }}
+
+# The integration point for deployments. It resolves the ref to a commit on
+# main, re-runs every gate on that exact commit, then hands over to the
+# protected GitHub environment (staging or production: required reviewers,
+# environment secrets, main as the only deployment branch). One reference
+# target ships ready: a Linux server with Docker (DEPLOY_TARGET=vps,
+# docs/deploy-vps.md). For any other platform, the release job fails until it
+# is implemented for it (docs/ci-cd.md#deployment). A rollback is a deployment
+# of an earlier commit or release tag.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        required: true
+      ref:
+        description: What to deploy, on main (branch, release tag or commit SHA)
+        type: string
+        required: true
+        default: main
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve the commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # the image records of earlier runs
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      records: ${{ steps.records.outputs.records }}
+    steps:
+      # The checks below live in this file: a copy edited on another branch
+      # could drop them, which is why the environments must also allow main
+      # only (docs/ci-cd.md#deployment).
+      - name: Refuse runs of the workflow from another branch
+        if: ${{ github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error title=Wrong branch::Run Deploy from main; it deploys any commit on main."
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Only reviewed, merged code ships: the commit must be on main. Release
+      # tags and earlier commits (rollbacks) of main qualify.
+      - name: Resolve the ref to a commit on main
+        id: resolve
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          if [[ ! "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            echo "::error title=Invalid ref::Not a branch, tag or commit name: $REF"
+            exit 1
+          fi
+          sha=$(git rev-parse --verify --quiet "$REF^{commit}" || git rev-parse --verify --quiet "origin/$REF^{commit}") || {
+            echo "::error title=Unknown ref::$REF does not exist."
+            exit 1
+          }
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error title=Not on main::$REF ($sha) is not on main."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Deploying $REF = $sha" >> "$GITHUB_STEP_SUMMARY"
+      # Production runs the images staging ran, never a rebuild: the digests an
+      # earlier run of this workflow from main built, scanned and recorded for
+      # this commit. Never the tag <image>:<sha>, which any workflow with
+      # packages: write can push, from any branch (scripts/recorded-images.mjs).
+      - name: Earlier builds of this commit
+        if: vars.DEPLOY_TARGET == 'vps'
+        id: records
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/recorded-images.mjs "$SHA" api api-migrate web
+
+  gates:
+    name: Gates
+    needs: resolve
+    uses: ./.github/workflows/quality-gates.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  # --- Reference target: one Linux server with Docker -------------------------
+  # Opt in with the repository variable DEPLOY_TARGET=vps (docs/deploy-vps.md).
+  # The images go to ghcr.io (IMAGE_PREFIX) once per commit, are scanned there
+  # and recorded by digest (the artifacts image-<image>-<sha>); the server
+  # pulls those digests with this run's short-lived token, migrates, rolls out
+  # and rolls back on its own (deploy/vps/deploy.sh).
+
+  publish:
+    name: Publish ${{ matrix.image }}
+    needs: [resolve, gates]
+    if: vars.DEPLOY_TARGET == 'vps'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io with this run's token
+      actions: read # download the record of an earlier run
+    strategy:
+      matrix:
+        include:
+          - image: api
+            dockerfile: apps/api/Dockerfile
+            target: runtime
+          - image: api-migrate
+            dockerfile: apps/api/Dockerfile
+            target: migrate
+          - image: web
+            dockerfile: apps/web/Dockerfile
+            target: runtime
+    env:
+      IMAGE_NAME: ${{ matrix.image }}
+      IMAGE_PREFIX: ${{ vars.IMAGE_PREFIX }}
+    steps:
+      - name: The registry is ghcr.io
+        run: |
+          if [[ ! "$IMAGE_PREFIX" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._-]+$ ]]; then
+            echo "::error title=IMAGE_PREFIX::Set the repository variable IMAGE_PREFIX to ghcr.io/<owner>/<repository>, lowercase (docs/deploy-vps.md)."
+            exit 1
+          fi
+      # First: a checkout empties the directory it checks out into.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Earlier build of this commit
+        id: recorded
+        env:
+          RECORDS: ${{ needs.resolve.outputs.records }}
+        run: echo "run-id=$(jq -r --arg image "$IMAGE_NAME" '.[$image] // empty' <<< "$RECORDS")" >> "$GITHUB_OUTPUT"
+      # Staging recorded this commit's image already: production gets the very
+      # same digest, never a rebuild.
+      - name: Reuse it
+        if: steps.recorded.outputs.run-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-${{ matrix.image }}-${{ needs.resolve.outputs.sha }}
+          path: recorded
+          run-id: ${{ steps.recorded.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.recorded.outputs.run-id == ''
+      # Both paths pull from the registry: the scan below reads the image it
+      # deploys, built here or reused.
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # The day is the cache key of the operating system upgrade in the
+      # Dockerfiles (OS_UPGRADE_DATE), as in the gates' build.
+      - name: Day of the operating system fixes
+        id: day
+        if: steps.recorded.outputs.run-id == ''
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      # The Dockerfile's base images from the mirror, by digest, where it has
+      # them (scripts/tool-image.mjs): ECR Public limits anonymous pulls per
+      # address, and runners share theirs. Same digests, so the same image.
+      - name: Base images through the mirror
+        id: base
+        if: steps.recorded.outputs.run-id == ''
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          TOOL_IMAGE_MIRROR: mirror.gcr.io
+        run: |
+          {
+            echo 'contexts<<CONTEXTS'
+            node scripts/tool-image.mjs --build-contexts "$DOCKERFILE"
+            echo 'CONTEXTS'
+          } >> "$GITHUB_OUTPUT"
+      # Same context, target, base images and build cache as the scanned
+      # build of the gates: the layers are cache hits.
+      - name: Build and push
+        id: build
+        if: steps.recorded.outputs.run-id == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          push: true
+          build-args: |
+            APP_RELEASE=${{ needs.resolve.outputs.sha }}
+            OS_UPGRADE_DATE=${{ steps.day.outputs.date }}
+          tags: ${{ vars.IMAGE_PREFIX }}/${{ matrix.image }}:${{ needs.resolve.outputs.sha }}
+          build-contexts: ${{ steps.base.outputs.contexts }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          provenance: mode=max
+          sbom: true
+      # The digest this job pushed, as the build reports it, or the recorded
+      # one: never looked up from the tag.
+      - name: The image this run deploys
+        id: image
+        env:
+          RECORDED_RUN: ${{ steps.recorded.outputs.run-id }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [ -n "$RECORDED_RUN" ]; then
+            ref=$(cat "recorded/$IMAGE_NAME.ref")
+            origin="built and scanned by run $RECORDED_RUN"
+          else
+            ref="$IMAGE_PREFIX/$IMAGE_NAME@$BUILT_DIGEST"
+            origin="built here"
+          fi
+          if [[ ! "$ref" =~ ^"$IMAGE_PREFIX/$IMAGE_NAME"@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=Image::Not an image of $IMAGE_PREFIX pinned by digest: $ref ($origin). A record made under another IMAGE_PREFIX cannot be reused: deploy a newer commit."
+            exit 1
+          fi
+          mkdir -p image
+          printf '%s\n' "$ref" > "image/$IMAGE_NAME.ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "$IMAGE_NAME: $ref ($origin)" >> "$GITHUB_STEP_SUMMARY"
+      # The pushed digest itself, not the gates' local build: what ships is
+      # what was scanned (docs/security.md#container-images). A reused image
+      # is scanned again: it was scanned when staging built it, up to 90 days
+      # ago, and an advisory published since then must stop production too
+      # (deploy a newer commit, whose build takes the fix).
+      - name: Scan the pushed image
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          docker pull --quiet "$REF"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            "$(node scripts/tool-image.mjs trivy)" \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$REF"
+      # Read by this run's release job, and by later deployments of this
+      # commit (production after staging) through scripts/recorded-images.mjs.
+      - name: Record it
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-${{ matrix.image }}-${{ needs.resolve.outputs.sha }}
+          path: image/${{ matrix.image }}.ref
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true # a re-run of this job records again
+
+  release-vps:
+    name: Release to ${{ inputs.environment }} (server)
+    needs: [resolve, gates, publish]
+    if: vars.DEPLOY_TARGET == 'vps'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: read # the server pulls the images with this run's token
+    env:
+      SHA: ${{ needs.resolve.outputs.sha }}
+      TARGET_ENVIRONMENT: ${{ inputs.environment }}
+      IMAGE_PREFIX: ${{ vars.IMAGE_PREFIX }}
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/srv/app' }}
+      PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+    steps:
+      - name: Environment settings
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          for name in DEPLOY_HOST PUBLIC_URL DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [ -z "$(printenv "$name")" ]; then
+              echo "::error title=$name::Set $name in the $TARGET_ENVIRONMENT environment (docs/deploy-vps.md)."
+              exit 1
+            fi
+          done
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      # The server runs its own copy of deploy/vps. A release whose copy differs
+      # (a Caddy update from Dependabot, a fix to deploy.sh) stops here, before
+      # anything changes on the server (docs/deploy-vps.md#update-the-server-files).
+      - name: Check the server's deploy files
+        run: |
+          files=(compose.yaml Caddyfile realip.conf deploy.sh rollback.sh)
+          expected=$(cd deploy/vps && sha256sum "${files[@]}")
+          status=0
+          actual=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' && sha256sum ${files[*]}") || status=$?
+          if [ "$status" -eq 255 ]; then
+            echo "::error title=Server unreachable::Could not connect to $DEPLOY_HOST over SSH."
+            exit 1
+          fi
+          if [ "$expected" != "$actual" ]; then
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            echo "::error title=Server files out of date::$DEPLOY_PATH differs from deploy/vps in this release: copy the files (docs/deploy-vps.md#update-the-server-files), then deploy again."
+            exit 1
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      # The images publish recorded in this run, before the approval: what the
+      # reviewers saw in the run's summary is what ships. Never a lookup of
+      # the tag, which could have moved while the run waited.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: image-*-${{ needs.resolve.outputs.sha }}
+          path: images
+          merge-multiple: true
+      - name: The digests to deploy
+        id: digests
+        run: |
+          for image in api api-migrate web; do
+            ref=$(cat "images/$image.ref" 2> /dev/null || true)
+            if [[ ! "$ref" =~ ^"$IMAGE_PREFIX/$image"@sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::No recorded digest for $image in this run (got \"$ref\")."
+              exit 1
+            fi
+            echo "${image//-/_}=$ref" >> "$GITHUB_OUTPUT"
+          done
+      # deploy.sh records the running release, migrates, rolls out and goes
+      # back by itself when the rollout fails. The token travels on stdin,
+      # never on a command line.
+      - name: Deploy on the server
+        id: deploy
+        env:
+          API_REF: ${{ steps.digests.outputs.api }}
+          MIGRATE_REF: ${{ steps.digests.outputs.api_migrate }}
+          WEB_REF: ${{ steps.digests.outputs.web }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REGISTRY_TOKEN=\$(cat) REGISTRY_USER='$GITHUB_ACTOR' '$DEPLOY_PATH/deploy.sh' '$API_REF' '$MIGRATE_REF' '$WEB_REF' '$SHA'"
+      - name: Smoke test
+        run: node scripts/smoke-test.mjs --url "$PUBLIC_URL" --release "$SHA"
+      - name: Roll back
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "'$DEPLOY_PATH/rollback.sh'"
+          echo "::error title=Rolled back::The smoke test failed: the previous release is running again."
+
+  # --- Any other platform ------------------------------------------------------
+
+  release:
+    name: Release to ${{ inputs.environment }}
+    needs: [resolve, gates]
+    if: vars.DEPLOY_TARGET != 'vps'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    steps:
+      # Replace with the provider's steps, for needs.resolve.outputs.sha only
+      # (never inputs.ref, which can move), in this order
+      # (docs/ci-cd.md#deployment):
+      #   1. images: push them once per commit (docker-images.yml with
+      #      push: true), scan the pushed digests and record them; production
+      #      reuses the digests staging recorded, never a rebuild. Take each
+      #      digest from the build's output or that record, never from the
+      #      tag <image>:<sha>, which any workflow with packages: write can
+      #      push (the VPS jobs above do this, scripts/recorded-images.mjs);
+      #      deploy <image>@<digest> from here on;
+      #   2. record the digests running before this deployment: they are the
+      #      rollback target;
+      #   3. run the api-migrate image against the environment's database; if
+      #      it fails, stop: the running version keeps serving
+      #      (docs/incident-response.md#10-failed-database-migration);
+      #   4. roll out the api image, then the web image;
+      #   5. smoke test: node scripts/smoke-test.mjs --url <public URL>
+      #      --api <API URL inside the platform> --release <sha>;
+      #   6. on failure, redeploy the digests recorded in step 2 (rollback).
+      - name: Deployment is not configured
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          echo "::error title=Deployment not configured::Implement the release job for your infrastructure (docs/ci-cd.md#deployment). Commit: $SHA"
+          exit 1

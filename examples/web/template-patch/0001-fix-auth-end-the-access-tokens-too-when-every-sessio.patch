@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 17:00:55 -0600
+Subject: [PATCH 01/10] fix(auth): end the access tokens too when every session
+ ends
+
+revokeAll() ended the refresh sessions but left every access token
+already issued valid for up to 15 minutes. It now raises the account's
+securityVersion in the same transaction through endSessionsLocked(),
+which a change that must end access at once (an account disabled, a
+role taken away) calls inside its own transaction.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/api/src/auth/auth.int.spec.ts         | 16 +++++++++++++++
+ apps/api/src/auth/sessions.service.spec.ts | 11 +++++++---
+ apps/api/src/auth/sessions.service.ts      | 24 +++++++++++++++++-----
+ docs/security.md                           | 12 +++++------
+ 4 files changed, 49 insertions(+), 14 deletions(-)
+
+diff --git a/apps/api/src/auth/auth.int.spec.ts b/apps/api/src/auth/auth.int.spec.ts
+index 010bb30..27e527f 100644
+--- a/apps/api/src/auth/auth.int.spec.ts
++++ b/apps/api/src/auth/auth.int.spec.ts
+@@ -190,6 +190,22 @@ describe('Auth (integration)', () => {
+     await expect(t.prisma.session.count()).resolves.toBe(0);
+   });
+ 
++  it('ends every session and every access token already issued at once (revokeAll)', async () => {
++    const browser = await signIn(t.server, EMAIL);
++    const user = await t.prisma.user.findUniqueOrThrow({ where: { email: EMAIL } });
++    await request(t.server).get('/api/users/me').set(bearer(browser.accessToken)).expect(200);
++
++    await t.app.get(SessionsService).revokeAll(user.id);
++
++    // Refused now, not when the access token expires.
++    await request(t.server).get('/api/users/me').set(bearer(browser.accessToken)).expect(401);
++    await request(t.server)
++      .post('/api/auth/refresh')
++      .set('Cookie', browser.refreshCookie)
++      .expect(401);
++    await expect(t.prisma.session.count({ where: { revokedAt: null } })).resolves.toBe(0);
++  });
++
+   it('keeps the cookies when the refresh fails on the server side', async () => {
+     const session = await signIn(t.server, EMAIL);
+     vi.spyOn(t.app.get(SessionsService), 'rotate').mockRejectedValueOnce(
+diff --git a/apps/api/src/auth/sessions.service.spec.ts b/apps/api/src/auth/sessions.service.spec.ts
+index a432fd6..5c27a0a 100644
+--- a/apps/api/src/auth/sessions.service.spec.ts
++++ b/apps/api/src/auth/sessions.service.spec.ts
+@@ -75,6 +75,7 @@ function fakePrisma(rows: Row[], storedPasswordHash = PASSWORD_HASH) {
+     findUnique: vi.fn(() =>
+       Promise.resolve({ passwordHash: storedPasswordHash, securityVersion: 4 }),
+     ),
++    update: vi.fn().mockResolvedValue({}),
+   };
+   // The user row lock (SELECT ... FOR UPDATE).
+   const $queryRaw = vi.fn().mockResolvedValue([]);
+@@ -83,7 +84,7 @@ function fakePrisma(rows: Row[], storedPasswordHash = PASSWORD_HASH) {
+     ...tx,
+     $transaction: <T>(work: (client: typeof tx) => Promise<T>) => work(tx),
+   };
+-  return { prisma: prisma as unknown as PrismaService, session, $queryRaw };
++  return { prisma: prisma as unknown as PrismaService, session, user, $queryRaw };
+ }
+ 
+ function rowFor(token: string, overrides: Partial<Row> = {}): Row {
+@@ -247,16 +248,20 @@ describe('SessionsService', () => {
+     expect(rows[0]?.revokedAt).toBeNull();
+   });
+ 
+-  it('ends every session of a user at once', async () => {
++  it('ends every session of a user at once, and every access token with them', async () => {
+     const rows = [
+       rowFor('one'),
+       rowFor('two', { familyId: OTHER_FAMILY }),
+       rowFor('someone else', { userId: '0190b6a1-0000-7000-8000-000000000002' }),
+     ];
+-    const { prisma, $queryRaw } = fakePrisma(rows);
++    const { prisma, user, $queryRaw } = fakePrisma(rows);
+     await new SessionsService(prisma).revokeAll(USER.id);
+     expect(rows.map((row) => row.revokedAt !== null)).toEqual([true, true, false]);
+     expect($queryRaw).toHaveBeenCalled();
++    expect(user.update).toHaveBeenCalledWith({
++      where: { id: USER.id },
++      data: { securityVersion: { increment: 1 } },
++    });
+   });
+ 
+   it('reports how many expired sessions a sweep removed, and survives a failure', async () => {
+diff --git a/apps/api/src/auth/sessions.service.ts b/apps/api/src/auth/sessions.service.ts
+index a511ec9..41a6cfb 100644
+--- a/apps/api/src/auth/sessions.service.ts
++++ b/apps/api/src/auth/sessions.service.ts
+@@ -215,14 +215,15 @@ export class SessionsService implements OnModuleInit, OnModuleDestroy {
+     if (reusedBy !== null) this.logReuse(reusedBy, during);
+   }
+ 
+-  /** Ends every session of a user at once (password change, account lock). */
++  /**
++   * Ends every session of a user at once, and every access token with them
++   * (endSessionsLocked): for a change that must end access now, outside a
++   * transaction of its own.
++   */
+   async revokeAll(userId: string): Promise<void> {
+     await this.prisma.$transaction(async (tx) => {
+       await lockUser(tx, userId);
+-      await tx.session.updateMany({
+-        where: { userId, revokedAt: null },
+-        data: { revokedAt: new Date() },
+-      });
++      await endSessionsLocked(tx, userId);
+     }, SESSION_TRANSACTION);
+   }
+ 
+@@ -256,6 +257,19 @@ export async function lockUser(tx: Tx, userId: string): Promise<void> {
+   await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId}::uuid FOR UPDATE`;
+ }
+ 
++/**
++ * Ends every session of a user and, by raising the account's securityVersion,
++ * every access token already issued (JwtAuthGuard refuses them at once instead
++ * of up to 15 minutes later): an account disabled, a role taken away, a
++ * password change required. Inside a transaction that holds the user's lock.
++ * A change that raises securityVersion itself (a new password) calls
++ * revokeSessionsLocked instead.
++ */
++export async function endSessionsLocked(tx: Tx, userId: string, now = Date.now()): Promise<void> {
++  await revokeSessionsLocked(tx, userId, now);
++  await tx.user.update({ where: { id: userId }, data: { securityVersion: { increment: 1 } } });
++}
++
+ /** Ends every session of a user, inside a transaction that holds the user's lock. */
+ export async function revokeSessionsLocked(
+   tx: Tx,
+diff --git a/docs/security.md b/docs/security.md
+index 726e092..ea64349 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -294,12 +294,12 @@ Two layers, both required:
+    admin access) and the access-matrix test every such route gets:
+    [authorization.md](authorization.md).
+ 
+-Role changes apply at the next refresh. `SessionsService.revokeAll(userId)` ends every refresh
+-session at once; an access token already issued stays valid until it expires (at most 15
+-minutes) unless the account's `security_version` changes: a password change or reset increments
+-it, and `JwtAuthGuard` then refuses every older access token at once. Increment it in the same
+-transaction for any other change that must end access at once (a role removed, an account
+-disabled).
++Role changes apply at the next refresh. An access token already issued stays valid until it
++expires (at most 15 minutes) unless the account's `security_version` changes: a password change
++or reset increments it, and `JwtAuthGuard` then refuses every older access token at once.
++`SessionsService.revokeAll(userId)`, and `endSessionsLocked(tx, userId)` inside a transaction that
++holds the user's lock, end every refresh session and raise it in the same transaction: use them
++for any other change that must end access at once (a role removed, an account disabled).
+ 
+ ### Route protection
+ 

@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 17:03:23 -0600
+Subject: [PATCH 03/10] test(api): retry the integration reset after a deadlock
+
+resetDatabase() empties every table with one TRUNCATE while the app
+under test is running: the mail worker's sweep at boot, or a delivery,
+can hold row locks while the TRUNCATE waits for its table locks, and
+PostgreSQL then aborts the TRUNCATE (40P01). That failed a spec now and
+then. A TRUNCATE aborted that way emptied nothing, so it is tried again,
+at most three times, and only for that error.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/api/test/app.ts | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/apps/api/test/app.ts b/apps/api/test/app.ts
+index c1b6929..f6d70cd 100644
+--- a/apps/api/test/app.ts
++++ b/apps/api/test/app.ts
+@@ -37,6 +37,22 @@ export async function resetDatabase(prisma: PrismaService): Promise<void> {
+   `;
+   if (tables.length === 0) return;
+   const list = tables.map(({ tablename }) => `"${tablename.replaceAll('"', '""')}"`).join(', ');
+-  // eslint-disable-next-line no-restricted-properties -- table names are identifiers, which no query can bind as parameters; each one comes from pg_tables and is quoted above
+-  await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} CASCADE`);
++  // A background job of the app under test (the mail worker's sweep at boot,
++  // a delivery) can hold row locks while the TRUNCATE waits for its table
++  // locks, and PostgreSQL may break the cycle by aborting the TRUNCATE
++  // (deadlock, 40P01). Nothing was emptied then, so trying again is safe.
++  for (let attempt = 1; ; attempt += 1) {
++    try {
++      // eslint-disable-next-line no-restricted-properties -- table names are identifiers, which no query can bind as parameters; each one comes from pg_tables and is quoted above
++      await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${list} CASCADE`);
++      return;
++    } catch (error) {
++      if (attempt >= 3 || !isDeadlock(error)) throw error;
++      await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
++    }
++  }
++}
++
++function isDeadlock(error: unknown): boolean {
++  return error instanceof Error && error.message.includes('40P01');
+ }

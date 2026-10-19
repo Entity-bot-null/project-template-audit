@@ -1,0 +1,115 @@
+# Weekly update pull requests; each one runs the full CI like any other.
+# The seven-day cooldown matches the supply-chain delay in pnpm-workspace.yaml
+# (minimumReleaseAge): a younger version would not install. Security updates
+# (Dependabot alerts) are not delayed by the cooldown (docs/security.md#dependency-maintenance).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    ignore:
+      # @types/node describes the Node.js major of .nvmrc and moves with it, by
+      # hand: a newer major types APIs the runtime does not have.
+      - dependency-name: '@types/node'
+        update-types: [version-update:semver-major]
+    groups:
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+      production:
+        dependency-type: production
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # The workflows, and the composite action they share (.github/actions/setup):
+  # '/' alone covers .github/workflows and a root action.yml only.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: docker
+    directories:
+      - /apps/api
+      - /apps/web
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # The Node.js major follows .nvmrc and engines, by hand, together with
+      # the build: a major can drop what the images rely on (Node.js 25 no
+      # longer bundles corepack, which installs pnpm here).
+      - dependency-name: docker/library/node
+        update-types: [version-update:semver-major]
+    commit-message:
+      prefix: build
+
+  # The tool images CI runs (.github/tool-images/Dockerfile): tag and digest
+  # updated together.
+  - package-ecosystem: docker
+    directory: /.github/tool-images
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # A PostgreSQL or Redis major moves by hand, with docker-compose.yml and,
+      # for PostgreSQL, the managed database and its data
+      # (docs/ci-cd.md#keeping-the-stack-current): CI tests the version that runs.
+      - dependency-name: docker/library/postgres
+        update-types: [version-update:semver-major]
+      - dependency-name: docker/library/redis
+        update-types: [version-update:semver-major]
+    groups:
+      tools:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # docker-compose.yml, and the reference server deployment's Caddy image
+  # (deploy/vps/compose.yaml).
+  - package-ecosystem: docker-compose
+    directories:
+      - /
+      - /deploy/vps
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # Majors by hand, with the CI images above: a PostgreSQL data directory
+      # (the local volume) does not start under the next major.
+      - dependency-name: postgres
+        update-types: [version-update:semver-major]
+      - dependency-name: redis
+        update-types: [version-update:semver-major]
+    commit-message:
+      prefix: build
+
+  # The Terraform providers of infra/terraform/digitalocean: the exact version
+  # in versions.tf and the checksums of .terraform.lock.hcl, for the platforms
+  # the lock file already lists, updated together.
+  - package-ecosystem: terraform
+    directory: /infra/terraform/digitalocean
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build

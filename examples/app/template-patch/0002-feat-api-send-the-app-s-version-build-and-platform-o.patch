@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Audit Hub <audit-hub@audit-hub.invalid>
+Date: Sat, 17 Oct 2026 18:10:07 -0600
+Subject: [PATCH 2/4] feat(api): send the app's version, build and platform on
+ every request
+
+docs/RELEASES.md#minimum-supported-version asks the app to tell the API
+which version sends each request, so a backend can refuse one it no
+longer supports, but nothing sent it. Every request, public ones
+included, now carries X-App-Version and X-App-Build (expo-application,
+already a dependency) and X-App-Platform. createHttp takes the headers
+as an option (a failure to read them never fails a request, and a
+caller's own header wins), and setRequestHeaders lets an integration
+add its own to them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ docs/RELEASES.md       |  8 ++++----
+ src/api/client.spec.ts | 33 +++++++++++++++++++++++++++++++++
+ src/api/client.ts      | 33 +++++++++++++++++++++++++++++++--
+ src/api/http.spec.ts   | 28 ++++++++++++++++++++++++++++
+ src/api/http.ts        |  9 +++++++++
+ 5 files changed, 105 insertions(+), 6 deletions(-)
+ create mode 100644 src/api/client.spec.ts
+
+diff --git a/docs/RELEASES.md b/docs/RELEASES.md
+index a64c255..28dc197 100644
+--- a/docs/RELEASES.md
++++ b/docs/RELEASES.md
+@@ -344,11 +344,11 @@ backend does:
+ app version < minimum supported version  →  the API refuses (for example 426 Upgrade Required)  →  the app shows "Update the app" with a store link
+ ```
+ 
+-What each side needs (none of it ships in the template, which has no backend to enforce it):
++What each side needs (the template does the first; the rest needs a backend to enforce it):
+ 
+-1. **The app tells its version**: a header on every request in `src/api/http.ts`, for example
+-   `X-App-Version: <nativeApplicationVersion>` and `X-App-Build: <nativeBuildVersion>` from
+-   `expo-application` (already a dependency), plus the platform.
++1. **The app tells its version**: every request, public ones included, carries
++   `X-App-Version: <nativeApplicationVersion>`, `X-App-Build: <nativeBuildVersion>` (from
++   `expo-application`) and `X-App-Platform: ios | android` (`src/api/client.ts`).
+ 2. **The backend compares** it with a minimum per platform kept in its configuration (not in the
+    app), and answers a dedicated status or error code for anything older, before any other check.
+ 3. **The app handles that answer**: a new `AppError` kind in `src/lib/errors.ts` (`kindForStatus`),
+diff --git a/src/api/client.spec.ts b/src/api/client.spec.ts
+new file mode 100644
+index 0000000..189691a
+--- /dev/null
++++ b/src/api/client.spec.ts
+@@ -0,0 +1,33 @@
++import { Platform } from 'react-native';
++
++import { ok, stubFetch } from '@/test/http';
++
++import { publicApi, setRequestHeaders } from './client';
++
++// The headers every request carries, so the API can refuse a version it no
++// longer supports (docs/RELEASES.md#minimum-supported-version).
++
++describe('the API clients', () => {
++  afterEach(() => {
++    setRequestHeaders(() => Promise.resolve({}));
++  });
++
++  it("send the app's version, build and platform, public endpoints included", async () => {
++    const fetch = stubFetch({ 'POST /api/auth/logout': () => ok(null) });
++    await publicApi.POST('/api/auth/logout', { body: { refreshToken: 'refresh-1' } });
++    const [sent] = fetch.requests;
++    expect(sent?.headers.get('X-App-Version')).toEqual(expect.any(String));
++    expect(sent?.headers.get('X-App-Build')).toEqual(expect.any(String));
++    expect(sent?.headers.get('X-App-Platform')).toBe(Platform.OS);
++    fetch.restore();
++  });
++
++  it("add an integration's own headers to them", async () => {
++    setRequestHeaders(() => Promise.resolve({ 'X-Device-Id': 'installation-1' }));
++    const fetch = stubFetch({ 'POST /api/auth/logout': () => ok(null) });
++    await publicApi.POST('/api/auth/logout', { body: { refreshToken: 'refresh-1' } });
++    expect(fetch.requests[0]?.headers.get('X-Device-Id')).toBe('installation-1');
++    expect(fetch.requests[0]?.headers.get('X-App-Platform')).toBe(Platform.OS);
++    fetch.restore();
++  });
++});
+diff --git a/src/api/client.ts b/src/api/client.ts
+index b3d2a28..f99f198 100644
+--- a/src/api/client.ts
++++ b/src/api/client.ts
+@@ -1,4 +1,6 @@
++import * as Application from 'expo-application';
+ import createClient from 'openapi-fetch';
++import { Platform } from 'react-native';
+ 
+ import { env } from '@/config/env';
+ 
+@@ -18,6 +20,33 @@ export function setAuthHandlers(handlers: AuthHandlers): void {
+   authHandlers = handlers;
+ }
+ 
++/**
++ * Which app sends every request, public ones included, so the API can refuse
++ * a version it no longer supports (docs/RELEASES.md#minimum-supported-version).
++ */
++function versionHeaders(): Record<string, string> {
++  return {
++    'X-App-Version': Application.nativeApplicationVersion ?? 'unknown',
++    'X-App-Build': Application.nativeBuildVersion ?? 'unknown',
++    'X-App-Platform': Platform.OS,
++  };
++}
++
++let extraHeaders: (() => Promise<Record<string, string>>) | undefined;
++
++/**
++ * Registered by an integration that sends headers of its own on every request
++ * (the Audit Hub connector: the installation's id), besides the version ones.
++ */
++export function setRequestHeaders(provider: () => Promise<Record<string, string>>): void {
++  extraHeaders = provider;
++}
++
++const appHeaders = async (): Promise<Record<string, string>> => ({
++  ...versionHeaders(),
++  ...(await extraHeaders?.()),
++});
++
+ const sessionAuth: AuthHandlers = {
+   getAccessToken: () => authHandlers?.getAccessToken() ?? Promise.resolve(null),
+   refreshAfterRejection: (rejected) =>
+@@ -27,13 +56,13 @@ const sessionAuth: AuthHandlers = {
+ /** Authenticated endpoints: every call carries the session's access token. */
+ export const api = createClient<paths>({
+   baseUrl: env.EXPO_PUBLIC_API_URL,
+-  fetch: createHttp({ auth: sessionAuth }),
++  fetch: createHttp({ auth: sessionAuth, headers: appHeaders }),
+ });
+ 
+ /** Public endpoints (sign-in, refresh, logout): no token, no refresh. */
+ export const publicApi = createClient<paths>({
+   baseUrl: env.EXPO_PUBLIC_API_URL,
+-  fetch: createHttp(),
++  fetch: createHttp({ headers: appHeaders }),
+ });
+ 
+ export type { AuthHandlers } from './http';
+diff --git a/src/api/http.spec.ts b/src/api/http.spec.ts
+index 1f032bd..7dd18b5 100644
+--- a/src/api/http.spec.ts
++++ b/src/api/http.spec.ts
+@@ -42,6 +42,34 @@ describe('createHttp', () => {
+     expect(new Set(ids).size).toBe(2);
+   });
+ 
++  it("adds the app's own headers, never over the caller's, and never fails for them", async () => {
++    const fetch = jest.fn((_request: Request) => Promise.resolve(respond(200)));
++    const headers = () => Promise.resolve({ 'X-App-Version': '1.4.2', 'X-App-Build': '42' });
++    await createHttp({ fetch, headers })(request('/x', { headers: { 'X-App-Build': 'mine' } }));
++    expect(fetch.mock.calls[0]?.[0].headers.get('X-App-Version')).toBe('1.4.2');
++    expect(fetch.mock.calls[0]?.[0].headers.get('X-App-Build')).toBe('mine');
++
++    const failing = () => Promise.reject(new Error('unreadable'));
++    await expect(createHttp({ fetch, headers: failing })(request())).resolves.toHaveProperty(
++      'status',
++      200,
++    );
++    expect(fetch.mock.calls[1]?.[0].headers.has('X-App-Version')).toBe(false);
++  });
++
++  it('notices a cancellation made while it read those headers', async () => {
++    const fetch = jest.fn((_request: Request) => Promise.resolve(respond(200)));
++    const controller = new AbortController();
++    const headers = () => {
++      controller.abort();
++      return Promise.resolve({});
++    };
++    await expect(
++      createHttp({ fetch, headers })(request('/x', { signal: controller.signal })),
++    ).rejects.toMatchObject({ kind: 'cancelled' });
++    expect(fetch).not.toHaveBeenCalled();
++  });
++
+   it("keeps a caller's request id", async () => {
+     const fetch = jest.fn((_request: Request) => Promise.resolve(respond(200)));
+     await createHttp({ fetch })(request('/x', { headers: { [REQUEST_ID_HEADER]: 'abc' } }));
+diff --git a/src/api/http.ts b/src/api/http.ts
+index 4962d71..6981dd1 100644
+--- a/src/api/http.ts
++++ b/src/api/http.ts
+@@ -8,6 +8,8 @@ import { addBreadcrumb } from '@/lib/observability/errorReporter';
+ //     aborts queries nobody needs anymore);
+ //   - an X-Request-Id, so a failure reported by a user can be found in the
+ //     server's logs;
++//   - the app's own headers (its version, build and platform:
++//     docs/RELEASES.md#minimum-supported-version), from `headers`;
+ //   - the session's access token, and after a 401 exactly one replay with a
+ //     renewed token (no loops, one refresh shared by concurrent requests);
+ //   - failures turned into AppError (network, timeout, cancelled) and left
+@@ -34,6 +36,8 @@ export interface HttpOptions {
+   auth?: AuthHandlers;
+   /** Defaults to the global fetch, looked up per call so tests can stub it. */
+   fetch?: (request: Request) => Promise<Response>;
++  /** Headers for every request (X-App-Version…); a failure to read them never fails a request. */
++  headers?: () => Promise<Record<string, string>>;
+ }
+ 
+ export type HttpFetch = (request: Request) => Promise<Response>;
+@@ -43,9 +47,14 @@ export function createHttp(options: HttpOptions = {}): HttpFetch {
+   const doFetch = options.fetch ?? ((request: Request) => globalThis.fetch(request));
+ 
+   async function send(request: Request, token: string | null): Promise<Response> {
++    // Read before the cancellation check: a cancellation while they are read is still seen.
++    const own = options.headers === undefined ? {} : await options.headers().catch(() => ({}));
+     if (request.signal.aborted) throw new AppError('cancelled', 'Request cancelled before sending');
+ 
+     const headers = new Headers(request.headers);
++    for (const [name, value] of Object.entries(own)) {
++      if (!headers.has(name)) headers.set(name, value);
++    }
+     headers.set('Accept', 'application/json');
+     if (!headers.has(REQUEST_ID_HEADER)) headers.set(REQUEST_ID_HEADER, newRequestId());
+     if (token !== null) headers.set('Authorization', `Bearer ${token}`);

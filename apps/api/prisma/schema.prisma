@@ -1,0 +1,1246 @@
+// Database conventions (docs/database.md): snake_case tables and columns
+// through @@map/@map, UUIDv7 primary keys, timestamptz(3) in UTC,
+// created_at on every table and updated_at on every table edited in place.
+// Every change ships as a committed migration (pnpm db:migrate).
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/prisma/generated"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Least to most privileged. Keep in sync with ROLES in
+// src/common/types/request-user.ts (a unit spec checks it).
+// member: signs in, sees no application data until given a role.
+// viewer: reads the events of the applications assigned to them.
+// auditor: also works alerts, exports and the 360° views of those apps.
+// admin: everything, every application, Audit Hub's own settings.
+enum Role {
+  member
+  viewer
+  auditor
+  admin
+}
+
+model User {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  // Stored trimmed and lowercased (normalizeEmail) so the unique index is
+  // case-insensitive in practice.
+  email           String    @unique
+  name            String
+  passwordHash    String    @map("password_hash")
+  role            Role      @default(member)
+  // Raised by every change that must end what was granted before it (a new
+  // password): access tokens carry it (claim sv) and are refused once it moved
+  // on, and one-time tokens minted under an older value no longer work.
+  securityVersion Int       @default(0) @map("security_version")
+  // Set by an administrator (PATCH /api/users/:id/status): while set, sign-in,
+  // refresh and every access token are refused, as for a wrong password.
+  // Disabling ends every session and raises securityVersion in one transaction.
+  disabledAt      DateTime? @map("disabled_at") @db.Timestamptz(3)
+  // Set once, when an administrator removes the account (DELETE
+  // /api/users/:id): the row stays, so the id that Audit Hub's own log and its
+  // records (alerts, holds, exports) name still resolves, but without the
+  // person: no address, name, password or second factor. A removed account
+  // stays disabled for good (a CHECK in the migration).
+  removedAt       DateTime? @map("removed_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  sessions        Session[]
+  mailMessages    MailMessage[]
+  accountTokens   AccountToken[]
+  invitationsSent Invitation[]
+  appAssignments  UserAppAssignment[]
+  mfaFactor       MfaFactor?
+  recoveryCodes   MfaRecoveryCode[]
+  mfaChallenges   MfaChallenge[]
+
+  @@map("users")
+}
+
+// One row per refresh token, grouped in families: a sign-in starts a family and
+// every rotation adds the successor to it. Only the token's SHA-256 is stored,
+// so a leaked table cannot be replayed.
+model Session {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  // Every token descended from one sign-in. A replayed rotated token (theft)
+  // and a logout revoke the whole family.
+  familyId        String    @map("family_id") @db.Uuid
+  // Absolute end of the family: rotations slide expiresAt, never past this.
+  familyExpiresAt DateTime  @map("family_expires_at") @db.Timestamptz(3)
+  tokenHash       String    @unique @map("token_hash")
+  expiresAt       DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt       DateTime? @map("revoked_at") @db.Timestamptz(3)
+  // True when revokedAt came from a rotation (a successor exists): only those
+  // rows get the race leeway; logout and theft revocations do not.
+  rotated         Boolean   @default(false)
+  // When the family started with a second factor (docs/adr/0012): refreshed
+  // access tokens take their mfa claim from here, never from the request.
+  mfaVerifiedAt   DateTime? @map("mfa_verified_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  // The sweep deletes rows past their own expiry. Revoked rows stay until
+  // then, so a token replayed at any point of its life still reads as reuse.
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// What a message is about: the worker renders it at send time from its kind
+// and the rows it points at (src/infrastructure/mail/templates). Adding a kind
+// is an expand step (ALTER TYPE ... ADD VALUE).
+enum MailKind {
+  // An operator's delivery check (pnpm --filter api mail:test).
+  test
+  // A link to choose a new password (anyone can ask for one: limited).
+  password_reset
+  // The password of an account was changed or reset (a security notice).
+  password_changed
+  // A link to confirm a sign-up (anyone can ask for one: limited).
+  sign_up_confirmation
+  // Someone signed up with an address that already has an account: a notice
+  // to its owner instead of a link (anyone can cause one: limited).
+  sign_up_existing
+  // A link to confirm a new address, sent to it (an account holder with
+  // their password can cause one: limited).
+  email_change_confirmation
+  // Someone tried to move an account to an address that has one: a notice to
+  // its owner instead of a link (limited).
+  email_change_existing
+  // The address of an account was changed: a notice to the previous address,
+  // with a link to undo it (a security notice, never held back).
+  email_changed
+  // An administrator's invitation to create an account (limited per address).
+  invitation
+  // Audit Hub: a new security alert, to the administrators and the auditors
+  // of its application (ids only; never held back).
+  security_alert
+  // Audit Hub: a second factor was set up, reset, or used with a recovery
+  // code (a security notice, never held back).
+  mfa_changed
+}
+
+enum MailStatus {
+  // Waiting for its next attempt (nextAttemptAt).
+  pending
+  // Claimed by a worker until lockedUntil; past it, another worker takes it over.
+  sending
+  // The SMTP server accepted it.
+  sent
+  // A permanent error, or out of attempts: kept for inspection and retry.
+  failed
+  // Not sent before expiresAt, or no longer relevant: dropped, never sent late.
+  expired
+}
+
+// The transactional outbox (docs/architecture.md#email): a business change
+// and the message it calls for are written in one transaction, and a worker
+// of the API delivers it afterwards, with retries. A row holds no body and no
+// secret: the worker renders the message when it sends it, and a link's token
+// is minted then, so only its hash is ever stored. The address is kept until
+// the message is sent or dropped, then only its keyed hash. CHECK constraints
+// in the migration enforce the states: a lease on every claimed row, sentAt
+// exactly on sent rows, no address left on sent or expired rows.
+model MailMessage {
+  id            String     @id @default(uuid(7)) @db.Uuid
+  kind          MailKind
+  status        MailStatus @default(pending)
+  // The address while it may still be needed (pending, sending, failed);
+  // cleared once the message is sent or dropped.
+  recipient     String?
+  // HMAC-SHA256 of the normalized address (mail.recipient.ts): per-address
+  // limits and lookups without keeping the address.
+  recipientHash String     @map("recipient_hash")
+  // The account the message is about, when there is one.
+  userId        String?    @map("user_id") @db.Uuid
+  // Ids the template needs (never a secret, a token, an address or a body).
+  payload       Json       @default("{}")
+  // Set by callers that could enqueue the same message twice: the second
+  // enqueue is a no-op.
+  dedupeKey     String?    @unique @map("dedupe_key")
+  attempts      Int        @default(0)
+  nextAttemptAt DateTime   @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  lockedUntil   DateTime?  @map("locked_until") @db.Timestamptz(3)
+  // Category of the last failure (smtp_4xx_451, connection, ...): never the
+  // server's text, which can quote the address.
+  lastError     String?    @map("last_error")
+  expiresAt     DateTime   @map("expires_at") @db.Timestamptz(3)
+  sentAt        DateTime?  @map("sent_at") @db.Timestamptz(3)
+  // The request that enqueued it, to follow one message through the logs.
+  requestId     String?    @map("request_id")
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // The worker's claim: due pending rows, and sending rows whose lease ended.
+  @@index([status, nextAttemptAt])
+  // Per-address limits count an address's recent messages.
+  @@index([recipientHash, createdAt])
+  // The retention sweep deletes old finished rows.
+  @@index([createdAt])
+  @@index([userId])
+  @@map("mail_messages")
+}
+
+// What a one-time token is for.
+enum AccountTokenPurpose {
+  password_reset
+  // Moves the account to targetEmail: sent to that new address.
+  email_change
+  // Puts targetEmail (the previous address) back, with a new password: sent
+  // to that previous address after a change. Not bound to the account's
+  // later state, so whoever took the account cannot void it.
+  email_revert
+}
+
+// One-time tokens sent in emailed links (docs/security.md#one-time-tokens).
+// Only the SHA-256 of the token is stored: the token itself exists in the
+// message on its way, never in the database or the outbox. A token works
+// once (usedAt), until expiresAt, and only while the account is as it was
+// when it was minted: the same securityVersion and, for an address-bound
+// purpose, the same email. Minting one deletes the previous unused ones of
+// the same purpose, so at most one link works.
+model AccountToken {
+  id              String              @id @default(uuid(7)) @db.Uuid
+  userId          String              @map("user_id") @db.Uuid
+  purpose         AccountTokenPurpose
+  tokenHash       String              @unique @map("token_hash")
+  securityVersion Int                 @map("security_version")
+  // The account's address when the token was minted.
+  email           String
+  // email_change: the new address; email_revert: the address to put back.
+  targetEmail     String?             @map("target_email")
+  expiresAt       DateTime            @map("expires_at") @db.Timestamptz(3)
+  usedAt          DateTime?           @map("used_at") @db.Timestamptz(3)
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  // The sweep deletes expired and used tokens.
+  @@index([expiresAt])
+  @@map("account_tokens")
+}
+
+// A sign-up waiting for its address to be confirmed. No account exists until
+// it is: sign-in, recovery and the admin list never see an unconfirmed one.
+// One per address; a new sign-up replaces it (and its link). The link's token
+// is minted when the message is sent, only its SHA-256 stored; confirming
+// takes the token AND the password chosen here, so whoever opens a link they
+// did not ask for cannot finish someone else's sign-up
+// (docs/security.md#sign-up).
+model SignUp {
+  id             String    @id @default(uuid(7)) @db.Uuid
+  // normalizeEmail()'d, like users.email.
+  email          String    @unique
+  name           String
+  passwordHash   String    @map("password_hash")
+  // Null until the message is sent.
+  tokenHash      String?   @unique @map("token_hash")
+  expiresAt      DateTime? @map("expires_at") @db.Timestamptz(3)
+  // Wrong passwords given with the link: the sign-up is dropped at the limit.
+  failedAttempts Int       @default(0) @map("failed_attempts")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@map("sign_ups")
+}
+
+// An administrator's invitation to create an account with a given role. No
+// account exists until it is accepted (with a name and a password chosen by
+// the person invited): sign-in, recovery and the user list never see it. One
+// per address; inviting again replaces it, and its link. The link's token is
+// minted when the message is sent, only its SHA-256 stored
+// (docs/security.md#invitations).
+model Invitation {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  // normalizeEmail()'d, like users.email.
+  email       String    @unique
+  // Fixed by the administrator: accepting cannot change it.
+  role        Role
+  // Who invited; kept when that account is deleted, as unknown.
+  invitedById String?   @map("invited_by_id") @db.Uuid
+  // Null until the message is sent.
+  tokenHash   String?   @unique @map("token_hash")
+  expiresAt   DateTime? @map("expires_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  invitedBy User?           @relation(fields: [invitedById], references: [id], onDelete: SetNull)
+  apps      InvitationApp[]
+
+  @@index([createdAt])
+  // Deleting a user sets its invitations' invitedById to null.
+  @@index([invitedById])
+  @@map("invitations")
+}
+
+// The applications an invited auditor or viewer will see: assigned when the
+// invitation is accepted (user_app_assignments), so the account can sign in
+// to the panel at once (auth/panel-access.ts). None for an administrator.
+model InvitationApp {
+  invitationId String @map("invitation_id") @db.Uuid
+  appId        String @map("app_id") @db.Uuid
+
+  invitation Invitation   @relation(fields: [invitationId], references: [id], onDelete: Cascade)
+  app        ConnectedApp @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([invitationId, appId])
+  @@index([appId])
+  @@map("invitation_apps")
+}
+
+// ---------------------------------------------------------------------------
+// Audit Hub (docs/design/audit-hub/data-model.md). User ids recorded by the
+// tables below (created_by_id, requested_by_id, …) carry no foreign key on
+// purpose: the history outlives the account.
+// ---------------------------------------------------------------------------
+
+enum ConnectedAppStatus {
+  active
+  // Ingestion answers 403; queries and the admin pages keep working.
+  suspended
+  // Its service ended: its audit log was deleted (audit_delete_events,
+  // audit_finish_application_deletion); its seals, catalog and the records of
+  // the deletion stay, its keys and secrets are gone.
+  retired
+}
+
+enum ResponseActionType {
+  revoke_sessions
+  require_password_change
+  disable_account
+}
+
+// An application that sends events, one row per deployment environment:
+// their data never mixes. Secrets are AES-256-GCM ciphertexts
+// (common/crypto/secret-box.ts, AUDIT_SECRETS_KEY). CHECK constraints in the
+// migration: slug format, timeouts and limits in range.
+model ConnectedApp {
+  id                      String               @id @default(uuid(7)) @db.Uuid
+  // Short id for metrics (label connected_app), URLs and webhook signatures.
+  slug                    String               @unique
+  name                    String
+  environment             String
+  status                  ConnectedAppStatus   @default(active)
+  // The row that holds Audit Hub's own events (audit_access, its sign-ins).
+  system                  Boolean              @default(false)
+  webhookUrl              String?              @map("webhook_url")
+  webhookSecret           Bytes?               @map("webhook_secret")
+  // The previous secret still signs (second signature) until this time.
+  webhookSecretPrevious   Bytes?               @map("webhook_secret_previous")
+  webhookPreviousUntil    DateTime?            @map("webhook_previous_until") @db.Timestamptz(3)
+  // HMAC key of the application's pseudonyms (emails, session references),
+  // shown to the application once.
+  pseudonymKey            Bytes                @map("pseudonym_key")
+  correlationEnabled      Boolean              @default(false) @map("correlation_enabled")
+  acceptedResponseActions ResponseActionType[] @default([]) @map("accepted_response_actions")
+  requireActionApproval   Boolean              @default(true) @map("require_action_approval")
+  heartbeatTimeoutSec     Int                  @default(300) @map("heartbeat_timeout_sec")
+  rateLimitPerMinute      Int                  @default(120) @map("rate_limit_per_minute")
+  createdById             String?              @map("created_by_id") @db.Uuid
+  createdAt               DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  keys               AppKey[]
+  catalogs           CatalogVersion[]
+  events             AuditEvent[]
+  sequenceStates     SequenceState[]
+  sequenceGaps       SequenceGap[]
+  ingestExceptions   IngestException[]
+  connectorInstances ConnectorInstance[]
+  seals              IntegritySeal[]
+  retentionPolicies  RetentionPolicy[]
+  retentionRuns      RetentionRun[]
+  legalHolds         LegalHold[]
+  erasureRuns        ErasureRun[]
+  alerts             Alert[]
+  webhookDeliveries  WebhookDelivery[]
+  responseActions    ResponseAction[]
+  assignments        UserAppAssignment[]
+  invitationApps     InvitationApp[]
+
+  @@map("connected_apps")
+}
+
+// A signing key of an application. The id is public (Audit-Key-Id); the
+// secret is shown once, then only its ciphertext exists. At most two keys are
+// valid at a time (the service checks it under an advisory lock): the current
+// one and the one it replaced, until expiresAt.
+model AppKey {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  appId       String    @map("app_id") @db.Uuid
+  secret      Bytes
+  // Fingerprint of the AUDIT_SECRETS_KEY that encrypted it (rotation).
+  encKeyId    String    @map("enc_key_id")
+  expiresAt   DateTime? @map("expires_at") @db.Timestamptz(3)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(3)
+  // Written at most once a minute per key.
+  lastUsedAt  DateTime? @map("last_used_at") @db.Timestamptz(3)
+  createdById String?   @map("created_by_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@index([appId])
+  @@map("app_keys")
+}
+
+// A published catalog. Immutable (append-only trigger, F3): an event always
+// points to the exact version it was validated against.
+model CatalogVersion {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  appId       String   @map("app_id") @db.Uuid
+  // First 16 hex of SHA-256 over the canonical document.
+  version     String
+  appVersion  String   @map("app_version")
+  document    Json
+  publishedAt DateTime @default(now()) @map("published_at") @db.Timestamptz(3)
+  keyId       String   @map("key_id") @db.Uuid
+
+  app     ConnectedApp    @relation(fields: [appId], references: [id], onDelete: Restrict)
+  actions CatalogAction[]
+  events  AuditEvent[]
+
+  @@unique([appId, version])
+  @@map("catalog_versions")
+}
+
+// One action of a catalog version, normalized for validation and filters.
+model CatalogAction {
+  id               String        @id @default(uuid(7)) @db.Uuid
+  catalogVersionId String        @map("catalog_version_id") @db.Uuid
+  appId            String        @map("app_id") @db.Uuid
+  action           String
+  category         AuditCategory
+  severity         AuditSeverity
+  // server | client | both
+  source           String
+  tags             String[]
+  userVisible      Boolean       @map("user_visible")
+  description      String
+  // The action's spec as published (details and change fields, marks).
+  spec             Json
+
+  catalogVersion CatalogVersion @relation(fields: [catalogVersionId], references: [id], onDelete: Restrict)
+
+  @@unique([catalogVersionId, action])
+  @@index([appId, action])
+  @@map("catalog_actions")
+}
+
+// A nonce seen with a valid signature: a replay inside the window is refused.
+// Swept once past expiresAt (window + skew).
+model IngestNonce {
+  keyId     String   @map("key_id") @db.Uuid
+  nonce     String
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([keyId, nonce])
+  @@index([expiresAt])
+  @@map("ingest_nonces")
+}
+
+// Per application and sequence epoch: how far the sequence is complete.
+model SequenceState {
+  appId             String    @map("app_id") @db.Uuid
+  epoch             String    @db.Uuid
+  contiguousThrough BigInt    @default(0) @map("contiguous_through")
+  maxSeen           BigInt    @default(0) @map("max_seen")
+  startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  // A new epoch (a restore, a reset) is acknowledged by an admin.
+  acknowledgedAt    DateTime? @map("acknowledged_at") @db.Timestamptz(3)
+  acknowledgedById  String?   @map("acknowledged_by_id") @db.Uuid
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@id([appId, epoch])
+  @@map("sequence_states")
+}
+
+// Missing source_seq numbers older than the grace period.
+model SequenceGap {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  appId        String    @map("app_id") @db.Uuid
+  epoch        String    @db.Uuid
+  fromSeq      BigInt    @map("from_seq")
+  toSeq        BigInt    @map("to_seq")
+  detectedAt   DateTime  @default(now()) @map("detected_at") @db.Timestamptz(3)
+  // arrived (late events filled it) | acknowledged (an admin accepted the loss)
+  closedReason String?   @map("closed_reason")
+  closedAt     DateTime? @map("closed_at") @db.Timestamptz(3)
+  closedById   String?   @map("closed_by_id") @db.Uuid
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@index([appId, closedAt])
+  @@map("sequence_gaps")
+}
+
+enum IngestExceptionKind {
+  rejected
+  // The same eventId sent again with a new sourceSeq (a device re-sent it).
+  duplicate
+}
+
+// Every event that did not become a row of audit_events, so its sequence
+// number is accounted for. Never the raw payload (it failed validation and
+// may hold anything): the reason, the paths and the size. Append-only, kept
+// 90 days.
+model IngestException {
+  id               String              @id @default(uuid(7)) @db.Uuid
+  appId            String              @map("app_id") @db.Uuid
+  epoch            String?             @db.Uuid
+  sourceSeq        BigInt?             @map("source_seq")
+  eventId          String?             @map("event_id")
+  kind             IngestExceptionKind
+  reason           String
+  errorPaths       String[]            @map("error_paths")
+  payloadBytes     Int                 @map("payload_bytes")
+  connectorVersion String              @map("connector_version")
+  receivedAt       DateTime            @default(now()) @map("received_at") @db.Timestamptz(3)
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@index([appId, epoch, sourceSeq])
+  @@index([receivedAt])
+  @@map("ingest_exceptions")
+}
+
+// Latest heartbeat of each connector process; swept after a day of silence.
+model ConnectorInstance {
+  appId              String   @map("app_id") @db.Uuid
+  instanceId         String   @map("instance_id") @db.Uuid
+  connectorName      String   @map("connector_name")
+  connectorVersion   String   @map("connector_version")
+  contractVersion    Int      @map("contract_version")
+  appVersion         String   @map("app_version")
+  catalogVersion     String   @map("catalog_version")
+  queueSize          Int      @map("queue_size")
+  queueOldestAgeSec  Int      @map("queue_oldest_age_sec")
+  queueRetrying      Int      @map("queue_retrying")
+  discardedAtSignOut Int      @map("discarded_at_sign_out")
+  lastHeartbeatAt    DateTime @map("last_heartbeat_at") @db.Timestamptz(3)
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@id([appId, instanceId])
+  @@index([lastHeartbeatAt])
+  @@map("connector_instances")
+}
+
+enum AuditCategory {
+  security
+  audit
+  access
+  system
+  // Use of Audit Hub itself (searches, details, exports): never from an app.
+  audit_access
+}
+
+enum AuditOutcome {
+  success
+  failure
+  denied
+}
+
+enum AuditSeverity {
+  info
+  low
+  medium
+  high
+  critical
+}
+
+enum ActorType {
+  user
+  service
+  system
+  anonymous
+}
+
+enum ClientType {
+  web
+  ios
+  android
+  api
+  job
+}
+
+// Computed from the IP without any database (private and reserved ranges).
+enum IpScope {
+  public
+  private
+  loopback
+  link_local
+  shared
+  reserved
+}
+
+// One audit event. Append-only (F3: REVOKE + trigger + retention functions).
+// recorded_at is set by the database. Personal data lives in event_personal
+// and event_locations, with shorter retention: the event keeps a salted
+// digest of each, and content_hash covers everything stored here. Partial
+// indexes for the explorer are in the migration.
+model AuditEvent {
+  // Audit Hub's id, minted at ingest: the explorer's cursor key.
+  id                   String        @id @default(uuid(7)) @db.Uuid
+  appId                String        @map("app_id") @db.Uuid
+  eventId              String        @map("event_id") @db.Uuid
+  sequenceEpoch        String?       @map("sequence_epoch") @db.Uuid
+  sourceSeq            BigInt?       @map("source_seq")
+  catalogVersionId     String?       @map("catalog_version_id") @db.Uuid
+  schemaVersion        Int           @map("schema_version") @db.SmallInt
+  connectorName        String        @map("connector_name")
+  connectorVersion     String        @map("connector_version")
+  occurredAt           DateTime      @map("occurred_at") @db.Timestamptz(3)
+  recordedAt           DateTime      @default(now()) @map("recorded_at") @db.Timestamptz(3)
+  category             AuditCategory
+  action               String
+  outcome              AuditOutcome
+  severity             AuditSeverity
+  // 0–100, computed at ingest (severity, outcome, IP scope, client-declared).
+  riskScore            Int           @map("risk_score") @db.SmallInt
+  reason               String?
+  actorType            ActorType     @map("actor_type")
+  actorId              String?       @map("actor_id")
+  actorRole            String?       @map("actor_role")
+  actorEmailHmac       String?       @map("actor_email_hmac")
+  actorEmailHmacShared String?       @map("actor_email_hmac_shared")
+  impersonatorId       String?       @map("impersonator_id")
+  sessionRef           String?       @map("session_ref")
+  resourceType         String?       @map("resource_type")
+  resourceId           String?       @map("resource_id")
+  parentResourceType   String?       @map("parent_resource_type")
+  parentResourceId     String?       @map("parent_resource_id")
+  changeBefore         Json?         @map("change_before")
+  changeAfter          Json?         @map("change_after")
+  changedFields        String[]      @map("changed_fields")
+  requestId            String?       @map("request_id")
+  traceId              String?       @map("trace_id")
+  httpMethod           String?       @map("http_method")
+  httpRoute            String?       @map("http_route")
+  httpStatus           Int?          @map("http_status") @db.SmallInt
+  durationMs           Int?          @map("duration_ms")
+  clientType           ClientType?   @map("client_type")
+  clientAppVersion     String?       @map("client_app_version")
+  clientAppBuild       String?       @map("client_app_build")
+  clientUpdateId       String?       @map("client_update_id") @db.Uuid
+  clientOs             String?       @map("client_os")
+  clientOsVersion      String?       @map("client_os_version")
+  clientDeviceModel    String?       @map("client_device_model")
+  clientLocale         String?       @map("client_locale")
+  clientTimeZone       String?       @map("client_time_zone")
+  clientNetworkType    String?       @map("client_network_type")
+  clientRoute          String?       @map("client_route")
+  // name@version of the client connector.
+  clientSdk            String?       @map("client_sdk")
+  clientDeclared       String[]      @map("client_declared")
+  ipScope              IpScope?      @map("ip_scope")
+  geoCountry           String?       @map("geo_country") @db.Char(2)
+  geoAsn               Int?          @map("geo_asn")
+  uaBrowser            String?       @map("ua_browser")
+  uaOs                 String?       @map("ua_os")
+  uaDeviceClass        String?       @map("ua_device_class")
+  details              Json?
+  truncatedFields      String[]      @map("truncated_fields")
+  droppedFields        String[]      @map("dropped_fields")
+  // occurred_at_adjusted, sensitive_unmasked, …
+  flags                String[]
+  // SHA-256(salt ‖ canonical satellite row); the salt is in that row.
+  personalDigest       Bytes?        @map("personal_digest")
+  locationDigest       Bytes?        @map("location_digest")
+  contentHash          Bytes         @map("content_hash")
+
+  app            ConnectedApp    @relation(fields: [appId], references: [id], onDelete: Restrict)
+  catalogVersion CatalogVersion? @relation(fields: [catalogVersionId], references: [id], onDelete: Restrict)
+  personal       EventPersonal?
+  location       EventLocation?
+  alertLinks     AlertEvent[]
+
+  @@unique([appId, eventId])
+  @@unique([appId, sequenceEpoch, sourceSeq])
+  @@index([appId, recordedAt(sort: Desc), id(sort: Desc)])
+  @@index([appId, category, recordedAt])
+  @@index([appId, action, recordedAt(sort: Desc)])
+  @@index([catalogVersionId])
+  @@index([recordedAt])
+  @@map("audit_events")
+}
+
+// Network and device data of an event: retention class personal (90 days by
+// default) and the subject's right to erasure. Append-only like the event.
+model EventPersonal {
+  eventPk        String   @id @map("event_pk") @db.Uuid
+  appId          String   @map("app_id") @db.Uuid
+  recordedAt     DateTime @map("recorded_at") @db.Timestamptz(3)
+  salt           Bytes
+  // Canonical text form (enrichment/ip.ts): what the digest covers, exactly.
+  ip             String?
+  userAgent      String?  @map("user_agent")
+  deviceId       String?  @map("device_id")
+  actorLabel     String?  @map("actor_label")
+  resourceLabel  String?  @map("resource_label")
+  geoSubdivision String?  @map("geo_subdivision")
+  geoCity        String?  @map("geo_city")
+  // City-level coordinates from the IP database, for impossible travel.
+  geoLatitude    Decimal? @map("geo_latitude") @db.Decimal(6, 3)
+  geoLongitude   Decimal? @map("geo_longitude") @db.Decimal(6, 3)
+  geoAccuracyKm  Int?     @map("geo_accuracy_km")
+  // Values of the catalog's personal paths (change.name, details.x).
+  personalChange Json?    @map("personal_change")
+  // The actor's phone, masked at the origin (•••• 1234): never in clear.
+  actorPhone     String?  @map("actor_phone")
+  // The request's client hints (Sec-CH-UA...): the browser's real brand,
+  // the system's version, a phone's model.
+  clientHints    Json?    @map("client_hints")
+
+  event AuditEvent @relation(fields: [eventPk], references: [id], onDelete: Restrict)
+
+  @@index([appId, ip, recordedAt])
+  @@index([recordedAt])
+  @@map("event_personal")
+}
+
+// Device coordinates (consent only; precise only with consent to it): retention class
+// location (30 days by default).
+model EventLocation {
+  eventPk            String   @id @map("event_pk") @db.Uuid
+  appId              String   @map("app_id") @db.Uuid
+  recordedAt         DateTime @map("recorded_at") @db.Timestamptz(3)
+  salt               Bytes
+  // Two decimals for an approximate position, five for a precise one
+  // (consent to the precise position): coordinateDecimals says which, so the
+  // digest reads each row as it was written.
+  latitude           Decimal  @db.Decimal(7, 5)
+  longitude          Decimal  @db.Decimal(8, 5)
+  coordinateDecimals Int      @default(2) @map("coordinate_decimals") @db.SmallInt
+  accuracyM          Int      @map("accuracy_m")
+  capturedAt         DateTime @map("captured_at") @db.Timestamptz(3)
+
+  event AuditEvent @relation(fields: [eventPk], references: [id], onDelete: Restrict)
+
+  @@index([recordedAt])
+  @@map("event_locations")
+}
+
+// One seal per stream (app, category) and time window [windowFrom, windowTo):
+// every event recorded in the window, in (recorded_at, id) order, as leaves.
+// sealHash chains the seals; signature = HMAC(AUDIT_INTEGRITY_KEY, sealHash).
+// Append-only, never deleted (docs/adr/0008).
+model IntegritySeal {
+  id           String        @id @default(uuid(7)) @db.Uuid
+  appId        String        @map("app_id") @db.Uuid
+  category     AuditCategory
+  // 1, 2, 3, … per stream.
+  sealNo       BigInt        @map("seal_no")
+  windowFrom   DateTime      @map("window_from") @db.Timestamptz(3)
+  windowTo     DateTime      @map("window_to") @db.Timestamptz(3)
+  eventCount   Int           @map("event_count")
+  leavesDigest Bytes         @map("leaves_digest")
+  prevHash     Bytes         @map("prev_hash")
+  sealHash     Bytes         @map("seal_hash")
+  // Fingerprint of the key that signed it.
+  keyId        String        @map("key_id")
+  signature    Bytes
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  app           ConnectedApp         @relation(fields: [appId], references: [id], onDelete: Restrict)
+  leaves        IntegritySealLeaves?
+  retentionRuns RetentionRunSeal[]
+
+  @@unique([appId, category, sealNo])
+  @@index([appId, category, windowTo])
+  @@map("integrity_seals")
+}
+
+// The leaves of a seal: n × (16-byte event pk ‖ 32-byte content hash). Deleted
+// by the retention function once every event of the seal is gone; the seal
+// keeps their digest and count.
+model IntegritySealLeaves {
+  sealId String @id @map("seal_id") @db.Uuid
+  leaves Bytes
+
+  seal IntegritySeal @relation(fields: [sealId], references: [id], onDelete: Restrict)
+
+  @@map("integrity_seal_leaves")
+}
+
+// Daily signed checkpoint over the head of every stream, exportable
+// (audit export --checkpoint) to keep a copy outside Audit Hub.
+model IntegrityCheckpoint {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  heads     Json
+  digest    Bytes
+  keyId     String   @map("key_id")
+  signature Bytes
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@map("integrity_checkpoints")
+}
+
+// Every verification (job or CLI) and its outcome. Append-only.
+model IntegrityVerification {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  // job | cli
+  trigger       String
+  scope         Json
+  // passed | failed | error
+  outcome       String
+  eventsChecked BigInt   @map("events_checked")
+  sealsChecked  Int      @map("seals_checked")
+  failures      Int
+  // The first failures: { kind, appId, category, sealNo, eventPk } (ids only).
+  failureSample Json?    @map("failure_sample")
+  startedAt     DateTime @map("started_at") @db.Timestamptz(3)
+  finishedAt    DateTime @default(now()) @map("finished_at") @db.Timestamptz(3)
+
+  @@index([finishedAt])
+  @@map("integrity_verifications")
+}
+
+enum RetentionClass {
+  security
+  audit
+  access
+  system
+  audit_access
+  // event_personal (network and device data)
+  personal
+  // event_locations (device coordinates)
+  location
+}
+
+// Per application and class. CHECK in the migration (F3): days >=
+// audit_retention_min_days(class) and <= 3650. No row: the minimum applies.
+model RetentionPolicy {
+  appId       String         @map("app_id") @db.Uuid
+  class       RetentionClass
+  days        Int
+  updatedById String?        @map("updated_by_id") @db.Uuid
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@id([appId, class])
+  @@map("retention_policies")
+}
+
+// Written by audit_purge() itself. Append-only.
+model RetentionRun {
+  id           String         @id @default(uuid(7)) @db.Uuid
+  appId        String         @map("app_id") @db.Uuid
+  class        RetentionClass
+  cutoff       DateTime       @db.Timestamptz(3)
+  deletedCount Int            @map("deleted_count")
+  heldCount    Int            @map("held_count")
+  // job | cli (retention); decommission (the application's whole log, at the
+  // end of its service); subject (a subject's events, for an erasure run)
+  trigger      String
+  // The erasure run a subject's deletion belongs to.
+  erasureRunId String?        @map("erasure_run_id") @db.Uuid
+  startedAt    DateTime       @map("started_at") @db.Timestamptz(3)
+  finishedAt   DateTime       @default(now()) @map("finished_at") @db.Timestamptz(3)
+
+  app        ConnectedApp       @relation(fields: [appId], references: [id], onDelete: Restrict)
+  erasureRun ErasureRun?        @relation(fields: [erasureRunId], references: [id], onDelete: Restrict)
+  seals      RetentionRunSeal[]
+
+  @@index([appId, class, finishedAt])
+  @@map("retention_runs")
+}
+
+// How many events of each seal a run deleted: the verifier accounts for every
+// missing leaf with these rows.
+model RetentionRunSeal {
+  runId        String @map("run_id") @db.Uuid
+  sealId       String @map("seal_id") @db.Uuid
+  deletedCount Int    @map("deleted_count")
+
+  run  RetentionRun  @relation(fields: [runId], references: [id], onDelete: Restrict)
+  seal IntegritySeal @relation(fields: [sealId], references: [id], onDelete: Restrict)
+
+  @@id([runId, sealId])
+  @@index([sealId])
+  @@map("retention_run_seals")
+}
+
+// A legal hold suspends retention and erasure for what it matches (every
+// non-null criterion must match). Released by a separate row, never edited.
+model LegalHold {
+  id             String    @id @default(uuid(7)) @db.Uuid
+  appId          String    @map("app_id") @db.Uuid
+  caseRef        String    @map("case_ref")
+  reason         String
+  actorId        String?   @map("actor_id")
+  actorEmailHmac String?   @map("actor_email_hmac")
+  resourceType   String?   @map("resource_type")
+  resourceId     String?   @map("resource_id")
+  fromAt         DateTime? @map("from_at") @db.Timestamptz(3)
+  toAt           DateTime? @map("to_at") @db.Timestamptz(3)
+  createdById    String    @map("created_by_id") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  app     ConnectedApp      @relation(fields: [appId], references: [id], onDelete: Restrict)
+  release LegalHoldRelease?
+
+  @@index([appId])
+  @@map("legal_holds")
+}
+
+model LegalHoldRelease {
+  holdId       String   @id @map("hold_id") @db.Uuid
+  reason       String
+  releasedById String   @map("released_by_id") @db.Uuid
+  releasedAt   DateTime @default(now()) @map("released_at") @db.Timestamptz(3)
+
+  hold LegalHold @relation(fields: [holdId], references: [id], onDelete: Restrict)
+
+  @@map("legal_hold_releases")
+}
+
+// Written by audit_erase_subject(). Append-only.
+model ErasureRun {
+  id              String   @id @default(uuid(7)) @db.Uuid
+  appId           String   @map("app_id") @db.Uuid
+  subject         String
+  personalDeleted Int      @map("personal_deleted")
+  locationDeleted Int      @map("location_deleted")
+  heldCount       Int      @map("held_count")
+  // connector | event | panel
+  requestedVia    String   @map("requested_via")
+  // personal: the satellite rows only, the events stay pseudonymous (and the
+  // subject is blocked in the per-person views); events: the subject's events
+  // go too, sealed ones at once and the rest as they are sealed (retention
+  // runs with trigger subject, which name this run).
+  scope           String   @default("personal")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  app           ConnectedApp   @relation(fields: [appId], references: [id], onDelete: Restrict)
+  retentionRuns RetentionRun[]
+
+  @@index([appId, subject])
+  @@map("erasure_runs")
+}
+
+// What the real-time rules remember per subject. Personal: swept after 90
+// days without activity, coordinates after 30 (retention job).
+model ActorDevice {
+  appId       String   @map("app_id") @db.Uuid
+  actorId     String   @map("actor_id")
+  // HMAC of the installation id, or of browser family + OS + device class.
+  deviceKey   String   @map("device_key")
+  firstSeenAt DateTime @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt  DateTime @map("last_seen_at") @db.Timestamptz(3)
+
+  @@id([appId, actorId, deviceKey])
+  @@index([lastSeenAt])
+  @@map("actor_devices")
+}
+
+model ActorCountry {
+  appId       String   @map("app_id") @db.Uuid
+  actorId     String   @map("actor_id")
+  country     String   @db.Char(2)
+  firstSeenAt DateTime @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt  DateTime @map("last_seen_at") @db.Timestamptz(3)
+
+  @@id([appId, actorId, country])
+  @@index([lastSeenAt])
+  @@map("actor_countries")
+}
+
+model ActorProfile {
+  appId          String    @map("app_id") @db.Uuid
+  actorId        String    @map("actor_id")
+  lastSeenAt     DateTime  @map("last_seen_at") @db.Timestamptz(3)
+  lastSignInAt   DateTime? @map("last_sign_in_at") @db.Timestamptz(3)
+  lastLatitude   Decimal?  @map("last_latitude") @db.Decimal(6, 3)
+  lastLongitude  Decimal?  @map("last_longitude") @db.Decimal(6, 3)
+  lastAccuracyKm Int?      @map("last_accuracy_km")
+  lastLocationAt DateTime? @map("last_location_at") @db.Timestamptz(3)
+
+  @@id([appId, actorId])
+  @@index([lastSeenAt])
+  @@map("actor_profiles")
+}
+
+// Position of a cursor-driven job (real-time rules): last (recorded_at, id).
+model RuleCursor {
+  name       String   @id
+  recordedAt DateTime @map("recorded_at") @db.Timestamptz(3)
+  eventPk    String   @map("event_pk") @db.Uuid
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("rule_cursors")
+}
+
+enum AlertStatus {
+  open
+  in_review
+  resolved
+  false_positive
+}
+
+// An alert, grouped: a rule firing again for the same group key while the
+// alert is open or in review adds an occurrence (partial unique index in the
+// migration). summary holds ids, counts and countries, never emails or IPs.
+model Alert {
+  id           String        @id @default(uuid(7)) @db.Uuid
+  appId        String        @map("app_id") @db.Uuid
+  rule         String
+  severity     AuditSeverity
+  status       AlertStatus   @default(open)
+  groupKey     String        @map("group_key")
+  subject      String?
+  title        String
+  summary      Json
+  occurrences  Int           @default(1)
+  firstSeenAt  DateTime      @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt   DateTime      @map("last_seen_at") @db.Timestamptz(3)
+  assigneeId   String?       @map("assignee_id") @db.Uuid
+  resolvedAt   DateTime?     @map("resolved_at") @db.Timestamptz(3)
+  resolvedById String?       @map("resolved_by_id") @db.Uuid
+  // Optimistic concurrency for status and assignee changes.
+  version      Int           @default(0)
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  app        ConnectedApp    @relation(fields: [appId], references: [id], onDelete: Restrict)
+  activities AlertActivity[]
+  events     AlertEvent[]
+
+  @@index([appId, status, lastSeenAt(sort: Desc)])
+  @@index([assigneeId])
+  @@map("alerts")
+}
+
+// History of an alert: created, occurrence, status, assignment, note,
+// notified. Append-only.
+model AlertActivity {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  alertId    String   @map("alert_id") @db.Uuid
+  kind       String
+  userId     String?  @map("user_id") @db.Uuid
+  fromStatus String?  @map("from_status")
+  toStatus   String?  @map("to_status")
+  note       String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  alert Alert @relation(fields: [alertId], references: [id], onDelete: Restrict)
+
+  @@index([alertId, createdAt])
+  @@map("alert_activities")
+}
+
+// The events behind an alert (the first 100).
+model AlertEvent {
+  alertId String @map("alert_id") @db.Uuid
+  eventPk String @map("event_pk") @db.Uuid
+
+  alert Alert      @relation(fields: [alertId], references: [id], onDelete: Restrict)
+  event AuditEvent @relation(fields: [eventPk], references: [id], onDelete: Restrict)
+
+  @@id([alertId, eventPk])
+  @@index([eventPk])
+  @@map("alert_events")
+}
+
+enum WebhookTarget {
+  app
+  slack
+  teams
+}
+
+enum DeliveryStatus {
+  pending
+  sending
+  delivered
+  failed
+  expired
+}
+
+// The webhook outbox, built like the mail outbox (docs/adr/0003): written in
+// the transaction that calls for it, claimed with a lease (FOR UPDATE SKIP
+// LOCKED), retried with backoff, signed when sent. id = Audit-Webhook-Id.
+model WebhookDelivery {
+  id            String         @id @default(uuid(7)) @db.Uuid
+  appId         String?        @map("app_id") @db.Uuid
+  target        WebhookTarget
+  type          String
+  payload       Json
+  status        DeliveryStatus @default(pending)
+  attempts      Int            @default(0)
+  nextAttemptAt DateTime       @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  lockedUntil   DateTime?      @map("locked_until") @db.Timestamptz(3)
+  // HTTP status or error category of the last attempt (never the body).
+  lastStatus    Int?           @map("last_status")
+  lastError     String?        @map("last_error")
+  deliveredAt   DateTime?      @map("delivered_at") @db.Timestamptz(3)
+  expiresAt     DateTime       @map("expires_at") @db.Timestamptz(3)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  app ConnectedApp? @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@index([status, nextAttemptAt])
+  @@index([appId, createdAt])
+  @@index([createdAt])
+  @@map("webhook_deliveries")
+}
+
+enum ResponseActionStatus {
+  pending_approval
+  dispatched
+  succeeded
+  failed
+  refused
+  unsupported
+  expired
+  cancelled
+}
+
+// A response action asked of an application. CHECK: approver ≠ requester,
+// reason 10–500 characters.
+model ResponseAction {
+  id            String               @id @default(uuid(7)) @db.Uuid
+  appId         String               @map("app_id") @db.Uuid
+  subject       String
+  action        ResponseActionType
+  reason        String
+  status        ResponseActionStatus
+  alertId       String?              @map("alert_id") @db.Uuid
+  requestedById String               @map("requested_by_id") @db.Uuid
+  approvedById  String?              @map("approved_by_id") @db.Uuid
+  approvedAt    DateTime?            @map("approved_at") @db.Timestamptz(3)
+  deliveryId    String?              @map("delivery_id") @db.Uuid
+  resultEventPk String?              @map("result_event_pk") @db.Uuid
+  expiresAt     DateTime             @map("expires_at") @db.Timestamptz(3)
+  completedAt   DateTime?            @map("completed_at") @db.Timestamptz(3)
+  createdAt     DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@index([appId, status])
+  @@index([alertId])
+  @@map("response_actions")
+}
+
+// Which applications a viewer or auditor may see. Admins see every one.
+model UserAppAssignment {
+  userId      String   @map("user_id") @db.Uuid
+  appId       String   @map("app_id") @db.Uuid
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  app  ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@id([userId, appId])
+  @@index([appId])
+  @@map("user_app_assignments")
+}
+
+// A TOTP factor (RFC 6238: SHA-1, 6 digits, 30 s; docs/adr/0012). The secret
+// is encrypted; lastUsedStep refuses a code twice.
+model MfaFactor {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  userId       String    @unique @map("user_id") @db.Uuid
+  secret       Bytes
+  encKeyId     String    @map("enc_key_id")
+  confirmedAt  DateTime? @map("confirmed_at") @db.Timestamptz(3)
+  lastUsedStep BigInt?   @map("last_used_step")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("mfa_factors")
+}
+
+// Ten single-use recovery codes, only as HMAC(pepper, code).
+model MfaRecoveryCode {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  codeHash  String    @unique @map("code_hash")
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("mfa_recovery_codes")
+}
+
+// The step between the password and the second factor (verify or enroll):
+// single use, 5 minutes, 5 attempts. Only the SHA-256 of its token is stored.
+model MfaChallenge {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  // verify | enroll
+  purpose         String
+  tokenHash       String    @unique @map("token_hash")
+  attempts        Int       @default(0)
+  // The account's securityVersion when the password was checked: a new
+  // password or a reset since then voids the challenge.
+  securityVersion Int       @default(0) @map("security_version")
+  expiresAt       DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt          DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("mfa_challenges")
+}
+
+// An export: what was asked, how much it returned and the digest of what was
+// streamed (also in its audit_access event).
+model ExportJob {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  requestedById String    @map("requested_by_id") @db.Uuid
+  filters       Json
+  // csv | jsonl
+  format        String
+  rowCap        Int       @map("row_cap")
+  // running | completed | truncated | failed
+  status        String
+  rowCount      Int?      @map("row_count")
+  // sha-256 of the streamed body, base64.
+  digest        String?
+  startedAt     DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  finishedAt    DateTime? @map("finished_at") @db.Timestamptz(3)
+
+  @@index([requestedById, startedAt])
+  @@map("export_jobs")
+}
+
+// Every run of a scheduled job: the "job did not run" alerts read the last
+// success from here. Swept after 90 days.
+model JobRun {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  job        String
+  // running | succeeded | failed | skipped
+  outcome    String
+  detail     Json?
+  startedAt  DateTime  @map("started_at") @db.Timestamptz(3)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(3)
+
+  @@index([job, startedAt(sort: Desc)])
+  @@map("job_runs")
+}
