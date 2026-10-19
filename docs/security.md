@@ -763,10 +763,13 @@ a disable comment that says so.
   past `.gitignore` included; `pnpm secrets:scan` (in CI too) scans every file git tracks or would
   add, and CI scans the whole history (gitleaks).
 - Never in an image: the Docker build context is an allowlist (`.dockerignore`): the workspace
-  manifests, the lockfile and `apps/`, minus env files, keys and certificates, logs and build
-  output. Anything else placed under `apps/` (a database dump, say) would still reach the build
-  stage and its cache, so keep such files out of the repository tree; the final images get only
-  what their Dockerfiles copy.
+  manifests, the lockfile, `apps/` and `packages/audit-contract/` (the API imports it at
+  runtime), minus env files, keys and certificates, logs and build output. Anything else placed
+  under them (a database dump, say) would still reach the build stage and its cache, so keep such
+  files out of the repository tree; the final images get only what their Dockerfiles copy.
+- Not mistaken for one: gitleaks runs with its default rules and two narrow allowances
+  (`.gitleaks.toml`): the SHA-256 digests in the connectors' manifests and the specs' fake device
+  token. Anything else that looks like a key still fails CI.
 - Never in logs: the access logs (API and nginx) have no cookies, authorization or other headers
   (nginx records the user agent), no bodies and no query strings; env validation errors name the
   variable, never the value; the 5xx log has the stack, not the request; and every line is
