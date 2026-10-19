@@ -23,7 +23,7 @@
     "schemas": "tsc -p tsconfig.build.json && node scripts/generate-schemas.mjs"
   },
   "dependencies": {
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
