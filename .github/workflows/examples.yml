@@ -289,9 +289,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
-        with:
-          cache-provider: basic
       - name: Install ccache
         timeout-minutes: 5
         run: |
@@ -311,6 +308,13 @@ jobs:
         timeout-minutes: 5
         working-directory: .examples/app
         run: pnpm exec expo prebuild --no-install --platform android --clean
+      # After the Android project exists: setup-gradle keys its cache on the
+      # Gradle files, and this repository has none until the example is
+      # generated (the template's own workflow finds React Native's in its
+      # node_modules from the start).
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
       - name: Install the Android NDK
         timeout-minutes: 10
         working-directory: .examples/app

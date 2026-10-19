@@ -24,11 +24,13 @@ FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm fetch
 
+# The API and the workspace package it imports at runtime (audit-contract),
+# built in order: "api..." selects the API and its workspace dependencies.
 FROM deps AS build
 COPY . .
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm install --offline --frozen-lockfile --filter api
-RUN pnpm --filter api build
+    pnpm install --offline --frozen-lockfile --filter "api..."
+RUN pnpm --filter "api..." build
 
 # Production dependencies only, without install scripts: the Prisma client
 # was generated in the build stage and is compiled into dist/. Starts from
@@ -38,8 +40,9 @@ FROM base AS prod-deps
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
+COPY packages/audit-contract/package.json packages/audit-contract/
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm install --frozen-lockfile --prod --filter api --ignore-scripts
+    pnpm install --frozen-lockfile --prod --filter "api..." --ignore-scripts
 
 # The migration job's dependencies: the production ones (the Prisma CLI is
 # one) plus the CLI's schema engine, which only its install script downloads.
@@ -90,6 +93,10 @@ COPY --from=prod-deps /repo/node_modules ./node_modules
 COPY --from=prod-deps /repo/apps/api/node_modules ./apps/api/node_modules
 COPY --from=build /repo/apps/api/package.json ./apps/api/package.json
 COPY --from=build /repo/apps/api/dist ./apps/api/dist
+# The contract the API imports: where its workspace link points, compiled.
+COPY --from=prod-deps /repo/packages/audit-contract/node_modules ./packages/audit-contract/node_modules
+COPY --from=build /repo/packages/audit-contract/package.json ./packages/audit-contract/package.json
+COPY --from=build /repo/packages/audit-contract/dist ./packages/audit-contract/dist
 WORKDIR /app/apps/api
 # Never root at runtime. The files above stay root's (no --chown): the node
 # user can read and run the code, never change it.

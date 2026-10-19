@@ -1,0 +1,26 @@
+# gitleaks over the whole history (CI: quality-gates.yml, "Secrets in the git
+# history"). Its default rules, with two allowances, each as narrow as the
+# values it lets through (docs/security.md#secrets):
+title = "Audit Hub"
+
+[extend]
+useDefault = true
+
+# The vendored connectors' manifests (connector.json, and their copies in the
+# examples' template patches): a file's path and the SHA-256 of its content,
+# which "generic-api-key" takes for a key when the path says "api". A line
+# ending in that shape only: a quoted path, then 64 hexadecimal characters
+# (whatever diff markers come before it, in the history and in a patch).
+[[allowlists]]
+description = "SHA-256 digests of vendored files in connector manifests"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = ['''"[\w./@-]+": "[0-9a-f]{64}",?\s*$''']
+
+# A fake push token of the specs (and of their copies in the template
+# patches): a device token that Expo's push service would refuse.
+[[allowlists]]
+description = "The specs' fake device token"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''['"]a1b2c3d4e5f6['"]''']
