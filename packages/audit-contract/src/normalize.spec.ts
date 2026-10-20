@@ -80,6 +80,27 @@ describe('normalizeAuditEvent', () => {
     expect(result.event.severity).toBeUndefined();
   });
 
+  it('drops a key every object inherits (constructor, __proto__…) as any unknown one', () => {
+    // As JSON.parse builds them: "__proto__" an own key, not the prototype.
+    const resource = JSON.parse(
+      '{"type":"order","id":"o-1","constructor":"x","__proto__":{"admin":true},"toString":1,"hasOwnProperty":2}',
+    ) as Record<string, unknown>;
+    const client = JSON.parse('{"type":"web","valueOf":"x"}') as Record<string, unknown>;
+    const result = ok(normalizeAuditEvent({ ...auditEvent(), resource, client }, NOW));
+    expect(result.droppedFields.sort()).toEqual(
+      [
+        'client.valueOf',
+        'resource.__proto__',
+        'resource.constructor',
+        'resource.hasOwnProperty',
+        'resource.toString',
+      ].sort(),
+    );
+    expect(result.event.resource).toEqual({ type: 'order', id: 'o-1' });
+    expect(Object.getPrototypeOf(result.event.resource)).toBe(Object.prototype);
+    expect(({} as { admin?: unknown }).admin).toBeUndefined();
+  });
+
   it('cuts long free text and says where', () => {
     const event = {
       ...auditEvent(),

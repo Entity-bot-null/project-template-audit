@@ -1,7 +1,7 @@
 import { CONTRACT_VERSION } from './contract/index.js';
 
 /** Who sends: every request to Audit Hub names its connector and version. */
-export const CONNECTOR = { name: 'audit-nestjs', version: '0.3.0' } as const;
+export const CONNECTOR = { name: 'audit-nestjs', version: '0.3.1' } as const;
 export { CONTRACT_VERSION };
 
 // Injection tokens: the connector's settings and the ports the project

@@ -1,6 +1,6 @@
 {
   "name": "audit-expo",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Audit Hub connector for an app created from project-template-app: the device's own events, queued offline per user and sent through the app's API, the account's security (activity, \"Was it you?\") and the phone's push token. Installed as source (docs/adr/0009).",
   "type": "module",
