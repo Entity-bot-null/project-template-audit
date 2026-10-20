@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/Entity-bot-null/project-template-audit/compare/v0.2.1...v0.3.0) (2026-10-20)
+
+
+### Features
+
+* **alerts:** live alerts, tunable rules, silences, escalation and source health ([#19](https://github.com/Entity-bot-null/project-template-audit/issues/19)) ([fbee687](https://github.com/Entity-bot-null/project-template-audit/commit/fbee687862cadff6e42d2d0d20f2ad720936d96f))
+
 ## [0.2.1](https://github.com/Entity-bot-null/project-template-audit/compare/v0.2.0...v0.2.1) (2026-10-20)
 
 

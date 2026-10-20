@@ -18506,7 +18506,7 @@
   "info": {
     "title": "project-template-audit API",
     "description": "REST API under /api. Every response body is { data, message }; errors carry data: null. Authenticated routes take the access token from POST /api/auth/sign-in as a bearer token; the refresh token is an httpOnly cookie. Machine-to-machine routes (/api/ingest/, /api/connector/) take a request signed with a connected application's key instead (auditSignature, docs/adr/0006).",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "contact": {}
   },
   "tags": [],
