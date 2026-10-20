@@ -3392,6 +3392,407 @@
         ]
       }
     },
+    "/api/account/notification-preferences": {
+      "get": {
+        "operationId": "NotificationPreferencesController_get",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "sound": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "volume": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "severities": {}
+                          },
+                          "required": [
+                            "enabled",
+                            "volume",
+                            "severities"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "browser": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "severities": {}
+                          },
+                          "required": [
+                            "enabled",
+                            "severities"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "criticalRepeat": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "intervalSeconds": {
+                              "type": "integer",
+                              "minimum": 30,
+                              "maximum": 600
+                            },
+                            "times": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 10
+                            }
+                          },
+                          "required": [
+                            "enabled",
+                            "intervalSeconds",
+                            "times"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "quietUntil": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "mutedAppIds": {
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid"
+                          }
+                        }
+                      },
+                      "required": [
+                        "sound",
+                        "browser",
+                        "criticalRepeat",
+                        "quietUntil",
+                        "mutedAppIds"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Your notification preferences: sounds, browser notices, quiet times",
+        "tags": [
+          "account"
+        ]
+      },
+      "put": {
+        "operationId": "NotificationPreferencesController_put",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sound": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "volume": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
+                      },
+                      "severities": {
+                        "maxItems": 5,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "info",
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "enabled",
+                      "volume",
+                      "severities"
+                    ]
+                  },
+                  "browser": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "severities": {
+                        "maxItems": 5,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "info",
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "enabled",
+                      "severities"
+                    ]
+                  },
+                  "criticalRepeat": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "intervalSeconds": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 600
+                      },
+                      "times": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10
+                      }
+                    },
+                    "required": [
+                      "enabled",
+                      "intervalSeconds",
+                      "times"
+                    ]
+                  },
+                  "quietUntil": {
+                    "nullable": true,
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "mutedAppIds": {
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  }
+                },
+                "required": [
+                  "sound",
+                  "browser",
+                  "criticalRepeat",
+                  "quietUntil",
+                  "mutedAppIds"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "sound": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "volume": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            "severities": {}
+                          },
+                          "required": [
+                            "enabled",
+                            "volume",
+                            "severities"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "browser": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "severities": {}
+                          },
+                          "required": [
+                            "enabled",
+                            "severities"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "criticalRepeat": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "intervalSeconds": {
+                              "type": "integer",
+                              "minimum": 30,
+                              "maximum": 600
+                            },
+                            "times": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 10
+                            }
+                          },
+                          "required": [
+                            "enabled",
+                            "intervalSeconds",
+                            "times"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "quietUntil": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "mutedAppIds": {
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "format": "uuid"
+                          }
+                        }
+                      },
+                      "required": [
+                        "sound",
+                        "browser",
+                        "criticalRepeat",
+                        "quietUntil",
+                        "mutedAppIds"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Change your notification preferences",
+        "tags": [
+          "account"
+        ]
+      }
+    },
     "/api/admin/invitations": {
       "post": {
         "description": "Sends a one-time link (valid 7 days); the account exists once it is accepted with a name and a password the person chooses. An administrator, or an auditor or a viewer with the applications they will see (assigned on acceptance: without one they could not sign in). Inviting an address again replaces its invitation and link. 400: a role without its applications, or an administrator with some. 404: an application is unknown, Audit Hub's own or retired. 409: the address has an account. 429: the address got a message moments ago (or several today). 503: this deployment sends no email.",
@@ -8290,6 +8691,236 @@
         ]
       }
     },
+    "/api/alerts/stream": {
+      "get": {
+        "description": "text/event-stream, read with fetch (the Bearer token in its header, never in the URL). Events: `alert` (data `{ alert, replay }`: the alert as the list answers it; `id`: the stream position), `ready` (caught up), `resync` (too many changes missed: reload the lists), `end` (`reason`: renew, access or shutdown: reconnect, except after access). Send `Last-Event-ID` to replay what changed after it. At most 5 streams per account (429); each ends after 10 minutes, its access checked again every minute.",
+        "operationId": "AlertsController_live",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The live stream of alert changes (Server-Sent Events)",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/alerts/summary": {
+      "get": {
+        "operationId": "AlertsController_summary",
+        "parameters": [
+          {
+            "name": "appId",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "open": {
+                          "type": "object",
+                          "properties": {
+                            "info": {
+                              "type": "integer"
+                            },
+                            "low": {
+                              "type": "integer"
+                            },
+                            "medium": {
+                              "type": "integer"
+                            },
+                            "high": {
+                              "type": "integer"
+                            },
+                            "critical": {
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "info",
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "inReview": {
+                          "type": "object",
+                          "properties": {
+                            "info": {
+                              "type": "integer"
+                            },
+                            "low": {
+                              "type": "integer"
+                            },
+                            "medium": {
+                              "type": "integer"
+                            },
+                            "high": {
+                              "type": "integer"
+                            },
+                            "critical": {
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "info",
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "muted": {
+                          "type": "integer"
+                        },
+                        "oldestOpenAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "open",
+                        "inReview",
+                        "muted",
+                        "oldestOpenAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The unresolved alerts by severity: open (unacknowledged) and in review",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
     "/api/alerts": {
       "get": {
         "operationId": "AlertsController_list",
@@ -8358,6 +8989,74 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          },
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "muted",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          },
+          {
+            "name": "sort",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "default": "last_seen",
+              "type": "string",
+              "enum": [
+                "last_seen",
+                "first_seen",
+                "severity",
+                "status"
+              ]
+            }
+          },
+          {
+            "name": "order",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "default": "desc",
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
             }
           },
           {
@@ -8472,6 +9171,28 @@
                                 "type": "string",
                                 "format": "uuid"
                               },
+                              "acknowledgedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "acknowledgedById": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "escalations": {
+                                "type": "integer"
+                              },
+                              "mutedUntil": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "updatedAt": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
                               "version": {
                                 "type": "integer"
                               }
@@ -8492,6 +9213,11 @@
                               "assigneeId",
                               "resolvedAt",
                               "resolvedById",
+                              "acknowledgedAt",
+                              "acknowledgedById",
+                              "escalations",
+                              "mutedUntil",
+                              "updatedAt",
                               "version"
                             ],
                             "additionalProperties": false
@@ -8667,6 +9393,28 @@
                           "type": "string",
                           "format": "uuid"
                         },
+                        "acknowledgedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "acknowledgedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "escalations": {
+                          "type": "integer"
+                        },
+                        "mutedUntil": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
                         "version": {
                           "type": "integer"
                         },
@@ -8827,6 +9575,10 @@
                           "type": "string"
                         },
                         "resolvedByLabel": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "acknowledgedByLabel": {
                           "nullable": true,
                           "type": "string"
                         },
@@ -9039,12 +9791,18 @@
                         "assigneeId",
                         "resolvedAt",
                         "resolvedById",
+                        "acknowledgedAt",
+                        "acknowledgedById",
+                        "escalations",
+                        "mutedUntil",
+                        "updatedAt",
                         "version",
                         "summary",
                         "explanation",
                         "evidence",
                         "assigneeLabel",
                         "resolvedByLabel",
+                        "acknowledgedByLabel",
                         "activities",
                         "events"
                       ],
@@ -9154,6 +9912,11 @@
                     "type": "string",
                     "format": "uuid"
                   },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 500
+                  },
                   "version": {
                     "type": "integer",
                     "minimum": 0
@@ -9250,6 +10013,28 @@
                           "nullable": true,
                           "type": "string",
                           "format": "uuid"
+                        },
+                        "acknowledgedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "acknowledgedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "escalations": {
+                          "type": "integer"
+                        },
+                        "mutedUntil": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
                         },
                         "version": {
                           "type": "integer"
@@ -9411,6 +10196,10 @@
                           "type": "string"
                         },
                         "resolvedByLabel": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "acknowledgedByLabel": {
                           "nullable": true,
                           "type": "string"
                         },
@@ -9623,12 +10412,18 @@
                         "assigneeId",
                         "resolvedAt",
                         "resolvedById",
+                        "acknowledgedAt",
+                        "acknowledgedById",
+                        "escalations",
+                        "mutedUntil",
+                        "updatedAt",
                         "version",
                         "summary",
                         "explanation",
                         "evidence",
                         "assigneeLabel",
                         "resolvedByLabel",
+                        "acknowledgedByLabel",
                         "activities",
                         "events"
                       ],
@@ -9709,6 +10504,620 @@
           }
         ],
         "summary": "Change the status or the assignee of an alert",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/alerts/{id}/acknowledge": {
+      "post": {
+        "description": "409: closed, already acknowledged, or changed since `version` was read.",
+        "operationId": "AlertsController_acknowledge",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "version"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "appId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "appSlug": {
+                          "type": "string"
+                        },
+                        "rule": {
+                          "type": "string"
+                        },
+                        "severity": {
+                          "type": "string",
+                          "enum": [
+                            "info",
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                          ]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "open",
+                            "in_review",
+                            "resolved",
+                            "false_positive"
+                          ]
+                        },
+                        "subject": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "subjectLabel": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "occurrences": {
+                          "type": "integer"
+                        },
+                        "firstSeenAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "lastSeenAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "assigneeId": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "resolvedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "resolvedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "acknowledgedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "acknowledgedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "escalations": {
+                          "type": "integer"
+                        },
+                        "mutedUntil": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "version": {
+                          "type": "integer"
+                        },
+                        "summary": {
+                          "type": "object",
+                          "additionalProperties": {}
+                        },
+                        "explanation": {
+                          "type": "object",
+                          "properties": {
+                            "looksFor": {
+                              "nullable": true,
+                              "type": "string"
+                            },
+                            "saw": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "looksFor",
+                            "saw"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "evidence": {
+                          "type": "object",
+                          "properties": {
+                            "events": {
+                              "type": "integer"
+                            },
+                            "from": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "to": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "outcomes": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string"
+                                  },
+                                  "count": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "value",
+                                  "count"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "reasons": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string"
+                                  },
+                                  "count": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "value",
+                                  "count"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "actions": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string"
+                                  },
+                                  "count": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "value",
+                                  "count"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "accounts": {
+                              "type": "integer"
+                            },
+                            "countries": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string"
+                                  },
+                                  "count": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "value",
+                                  "count"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "devices": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "value": {
+                                    "type": "string"
+                                  },
+                                  "count": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "value",
+                                  "count"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "events",
+                            "from",
+                            "to",
+                            "outcomes",
+                            "reasons",
+                            "actions",
+                            "accounts",
+                            "countries",
+                            "devices"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "assigneeLabel": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "resolvedByLabel": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "acknowledgedByLabel": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "activities": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "kind": {
+                                "type": "string"
+                              },
+                              "userId": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "userLabel": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "fromStatus": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "toStatus": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "note": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "assigneeLabel": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "createdAt": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "kind",
+                              "userId",
+                              "userLabel",
+                              "fromStatus",
+                              "toStatus",
+                              "note",
+                              "assigneeLabel",
+                              "createdAt"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "events": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "eventId": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "appId": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "appSlug": {
+                                "type": "string"
+                              },
+                              "recordedAt": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "occurredAt": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "category": {
+                                "type": "string"
+                              },
+                              "action": {
+                                "type": "string"
+                              },
+                              "description": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "outcome": {
+                                "type": "string"
+                              },
+                              "severity": {
+                                "type": "string"
+                              },
+                              "riskScore": {
+                                "type": "integer"
+                              },
+                              "actor": {
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "type": "string"
+                                  },
+                                  "id": {
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
+                                  "role": {
+                                    "nullable": true,
+                                    "type": "string"
+                                  },
+                                  "label": {
+                                    "nullable": true,
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "id",
+                                  "role",
+                                  "label"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "resource": {
+                                "nullable": true,
+                                "type": "object",
+                                "properties": {
+                                  "type": {
+                                    "type": "string"
+                                  },
+                                  "id": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "type",
+                                  "id"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "requestId": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "httpStatus": {
+                                "nullable": true,
+                                "type": "integer"
+                              },
+                              "clientType": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "country": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "ipScope": {
+                                "nullable": true,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "eventId",
+                              "appId",
+                              "appSlug",
+                              "recordedAt",
+                              "occurredAt",
+                              "category",
+                              "action",
+                              "description",
+                              "outcome",
+                              "severity",
+                              "riskScore",
+                              "actor",
+                              "resource",
+                              "requestId",
+                              "httpStatus",
+                              "clientType",
+                              "country",
+                              "ipScope"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "appId",
+                        "appSlug",
+                        "rule",
+                        "severity",
+                        "status",
+                        "subject",
+                        "subjectLabel",
+                        "title",
+                        "occurrences",
+                        "firstSeenAt",
+                        "lastSeenAt",
+                        "assigneeId",
+                        "resolvedAt",
+                        "resolvedById",
+                        "acknowledgedAt",
+                        "acknowledgedById",
+                        "escalations",
+                        "mutedUntil",
+                        "updatedAt",
+                        "version",
+                        "summary",
+                        "explanation",
+                        "evidence",
+                        "assigneeLabel",
+                        "resolvedByLabel",
+                        "acknowledgedByLabel",
+                        "activities",
+                        "events"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed\n\nNot allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Acknowledge an alert: take it on (In review, yours when nobody has it); its escalation stops",
         "tags": [
           "alerts"
         ]
@@ -9833,6 +11242,28 @@
                           "type": "string",
                           "format": "uuid"
                         },
+                        "acknowledgedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "acknowledgedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "escalations": {
+                          "type": "integer"
+                        },
+                        "mutedUntil": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
                         "version": {
                           "type": "integer"
                         },
@@ -9993,6 +11424,10 @@
                           "type": "string"
                         },
                         "resolvedByLabel": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "acknowledgedByLabel": {
                           "nullable": true,
                           "type": "string"
                         },
@@ -10205,12 +11640,18 @@
                         "assigneeId",
                         "resolvedAt",
                         "resolvedById",
+                        "acknowledgedAt",
+                        "acknowledgedById",
+                        "escalations",
+                        "mutedUntil",
+                        "updatedAt",
                         "version",
                         "summary",
                         "explanation",
                         "evidence",
                         "assigneeLabel",
                         "resolvedByLabel",
+                        "acknowledgedByLabel",
                         "activities",
                         "events"
                       ],
@@ -10281,6 +11722,1360 @@
           }
         ],
         "summary": "Add a note to an alert",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/alert-mutes": {
+      "get": {
+        "operationId": "AlertMutesController_list",
+        "parameters": [
+          {
+            "name": "appId",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "appId": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "appSlug": {
+                                "type": "string"
+                              },
+                              "rule": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "reason": {
+                                "type": "string"
+                              },
+                              "until": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "createdById": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "createdAt": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "endedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "endedById": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "active": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "appId",
+                              "appSlug",
+                              "rule",
+                              "reason",
+                              "until",
+                              "createdById",
+                              "createdAt",
+                              "endedAt",
+                              "endedById",
+                              "active"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "items"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Silences of alerts: those in force first, then the most recent",
+        "tags": [
+          "alerts"
+        ]
+      },
+      "post": {
+        "description": "The alerts are still raised, kept and shown; email, chat, escalation and the panel's sounds and browser notices stay quiet until it ends.",
+        "operationId": "AlertMutesController_create",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "appId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "rule": {
+                    "nullable": true,
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 10080
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "appId",
+                  "rule",
+                  "minutes",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "appId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "appSlug": {
+                          "type": "string"
+                        },
+                        "rule": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "until": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "createdById": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "endedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "endedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "active": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "appId",
+                        "appSlug",
+                        "rule",
+                        "reason",
+                        "until",
+                        "createdById",
+                        "createdAt",
+                        "endedAt",
+                        "endedById",
+                        "active"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed\n\nNot allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Silence an application's alerts, of one rule or all, for a while",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/alert-mutes/{id}/end": {
+      "post": {
+        "operationId": "AlertMutesController_end",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "appId": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "appSlug": {
+                          "type": "string"
+                        },
+                        "rule": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "until": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "createdById": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "endedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "endedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "active": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "appId",
+                        "appSlug",
+                        "rule",
+                        "reason",
+                        "until",
+                        "createdById",
+                        "createdAt",
+                        "endedAt",
+                        "endedById",
+                        "active"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed\n\nNot allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Lift a silence now (kept, as ended)",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/detection-rules": {
+      "get": {
+        "operationId": "DetectionController_listRules",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "description": {
+                                "type": "string"
+                              },
+                              "kind": {
+                                "type": "string"
+                              },
+                              "severity": {
+                                "nullable": true,
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "low",
+                                  "medium",
+                                  "high",
+                                  "critical"
+                                ]
+                              },
+                              "grouping": {
+                                "type": "string"
+                              },
+                              "window": {
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "autoResolves": {
+                                "type": "boolean"
+                              },
+                              "params": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string"
+                                    },
+                                    "label": {
+                                      "type": "string"
+                                    },
+                                    "unit": {
+                                      "type": "string"
+                                    },
+                                    "default": {
+                                      "type": "integer"
+                                    },
+                                    "min": {
+                                      "type": "integer"
+                                    },
+                                    "max": {
+                                      "type": "integer"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "label",
+                                    "unit",
+                                    "default",
+                                    "min",
+                                    "max"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              },
+                              "settings": {
+                                "type": "object",
+                                "properties": {
+                                  "enabled": {
+                                    "type": "boolean"
+                                  },
+                                  "severity": {
+                                    "nullable": true,
+                                    "type": "string",
+                                    "enum": [
+                                      "info",
+                                      "low",
+                                      "medium",
+                                      "high",
+                                      "critical"
+                                    ]
+                                  },
+                                  "params": {
+                                    "type": "object",
+                                    "additionalProperties": {
+                                      "type": "integer"
+                                    }
+                                  },
+                                  "updatedById": {
+                                    "nullable": true,
+                                    "type": "string",
+                                    "format": "uuid"
+                                  },
+                                  "updatedAt": {
+                                    "nullable": true,
+                                    "type": "string",
+                                    "format": "date-time"
+                                  }
+                                },
+                                "required": [
+                                  "enabled",
+                                  "severity",
+                                  "params",
+                                  "updatedById",
+                                  "updatedAt"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "name",
+                              "description",
+                              "kind",
+                              "severity",
+                              "grouping",
+                              "window",
+                              "autoResolves",
+                              "params",
+                              "settings"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "maxNewAlertsPerHour": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "items",
+                        "maxNewAlertsPerHour"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The detection rules: what each detects, its parameters and its settings",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/detection-rules/{rule}": {
+      "put": {
+        "description": "400: a parameter out of its bounds, or a severity for a rule that decides its own.",
+        "operationId": "DetectionController_updateRule",
+        "parameters": [
+          {
+            "name": "rule",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "severity": {
+                    "nullable": true,
+                    "type": "string",
+                    "enum": [
+                      "info",
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "params": {
+                    "default": {},
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "severity"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        },
+                        "severity": {
+                          "nullable": true,
+                          "type": "string",
+                          "enum": [
+                            "info",
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                          ]
+                        },
+                        "grouping": {
+                          "type": "string"
+                        },
+                        "window": {
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "autoResolves": {
+                          "type": "boolean"
+                        },
+                        "params": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "label": {
+                                "type": "string"
+                              },
+                              "unit": {
+                                "type": "string"
+                              },
+                              "default": {
+                                "type": "integer"
+                              },
+                              "min": {
+                                "type": "integer"
+                              },
+                              "max": {
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "label",
+                              "unit",
+                              "default",
+                              "min",
+                              "max"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "settings": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "severity": {
+                              "nullable": true,
+                              "type": "string",
+                              "enum": [
+                                "info",
+                                "low",
+                                "medium",
+                                "high",
+                                "critical"
+                              ]
+                            },
+                            "params": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "integer"
+                              }
+                            },
+                            "updatedById": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "updatedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "enabled",
+                            "severity",
+                            "params",
+                            "updatedById",
+                            "updatedAt"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name",
+                        "description",
+                        "kind",
+                        "severity",
+                        "grouping",
+                        "window",
+                        "autoResolves",
+                        "params",
+                        "settings"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed\n\nNot allowed\n\nNot allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Turn a rule on or off, give it a severity, tune its parameters",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/escalation-policies": {
+      "get": {
+        "operationId": "DetectionController_listPolicies",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "severity": {
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "low",
+                                  "medium",
+                                  "high",
+                                  "critical"
+                                ]
+                              },
+                              "enabled": {
+                                "type": "boolean"
+                              },
+                              "firstAfterMinutes": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 10080
+                              },
+                              "repeatEveryMinutes": {
+                                "type": "integer",
+                                "minimum": 5,
+                                "maximum": 10080
+                              },
+                              "maxEscalations": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 10
+                              },
+                              "channels": {
+                                "maxItems": 2,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "email",
+                                    "chat"
+                                  ]
+                                }
+                              },
+                              "updatedById": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "updatedAt": {
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            "required": [
+                              "severity",
+                              "enabled",
+                              "firstAfterMinutes",
+                              "repeatEveryMinutes",
+                              "maxEscalations",
+                              "channels",
+                              "updatedById",
+                              "updatedAt"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "available": {
+                          "type": "object",
+                          "properties": {
+                            "email": {
+                              "type": "boolean"
+                            },
+                            "chat": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "email",
+                            "chat"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "items",
+                        "available"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The escalation policies, per severity, and the channels available",
+        "tags": [
+          "alerts"
+        ]
+      }
+    },
+    "/api/escalation-policies/{severity}": {
+      "put": {
+        "operationId": "DetectionController_updatePolicy",
+        "parameters": [
+          {
+            "name": "severity",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "firstAfterMinutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10080
+                  },
+                  "repeatEveryMinutes": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 10080
+                  },
+                  "maxEscalations": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10
+                  },
+                  "channels": {
+                    "maxItems": 2,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "email",
+                        "chat"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "firstAfterMinutes",
+                  "repeatEveryMinutes",
+                  "maxEscalations",
+                  "channels"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "severity": {
+                          "type": "string",
+                          "enum": [
+                            "info",
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                          ]
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "firstAfterMinutes": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 10080
+                        },
+                        "repeatEveryMinutes": {
+                          "type": "integer",
+                          "minimum": 5,
+                          "maximum": 10080
+                        },
+                        "maxEscalations": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 10
+                        },
+                        "channels": {
+                          "maxItems": 2,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "email",
+                              "chat"
+                            ]
+                          }
+                        },
+                        "updatedById": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "updatedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "severity",
+                        "enabled",
+                        "firstAfterMinutes",
+                        "repeatEveryMinutes",
+                        "maxEscalations",
+                        "channels",
+                        "updatedById",
+                        "updatedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed\n\nNot allowed\n\nNot allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Change a severity's escalation policy",
         "tags": [
           "alerts"
         ]
@@ -14378,6 +17173,172 @@
         "summary": "Withdraw a response action still waiting for approval",
         "tags": [
           "response-actions"
+        ]
+      }
+    },
+    "/api/sources": {
+      "get": {
+        "operationId": "SourcesController_list",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "message"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "appId": {
+                                "type": "string",
+                                "format": "uuid"
+                              },
+                              "slug": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "environment": {
+                                "type": "string"
+                              },
+                              "status": {
+                                "type": "string",
+                                "enum": [
+                                  "never",
+                                  "disconnected",
+                                  "delayed",
+                                  "idle",
+                                  "active"
+                                ]
+                              },
+                              "heartbeatTimeoutSec": {
+                                "type": "integer"
+                              },
+                              "lastHeartbeatAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "queueSize": {
+                                "type": "integer"
+                              },
+                              "queueOldestAgeSec": {
+                                "nullable": true,
+                                "type": "integer"
+                              },
+                              "retrying": {
+                                "type": "integer"
+                              },
+                              "lastEventAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "rejected15m": {
+                                "type": "integer"
+                              },
+                              "gaps": {
+                                "type": "integer"
+                              },
+                              "missingEvents": {
+                                "type": "integer"
+                              },
+                              "oldestGapAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time"
+                              }
+                            },
+                            "required": [
+                              "appId",
+                              "slug",
+                              "name",
+                              "environment",
+                              "status",
+                              "heartbeatTimeoutSec",
+                              "lastHeartbeatAt",
+                              "queueSize",
+                              "queueOldestAgeSec",
+                              "retrying",
+                              "lastEventAt",
+                              "rejected15m",
+                              "gaps",
+                              "missingEvents",
+                              "oldestGapAt"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "checkedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      },
+                      "required": [
+                        "items",
+                        "checkedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The event sources: connected, delayed, idle, disconnected; queues, refusals and gaps",
+        "tags": [
+          "sources"
         ]
       }
     },

@@ -52,14 +52,15 @@ model User {
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  sessions        Session[]
-  mailMessages    MailMessage[]
-  accountTokens   AccountToken[]
-  invitationsSent Invitation[]
-  appAssignments  UserAppAssignment[]
-  mfaFactor       MfaFactor?
-  recoveryCodes   MfaRecoveryCode[]
-  mfaChallenges   MfaChallenge[]
+  sessions               Session[]
+  mailMessages           MailMessage[]
+  accountTokens          AccountToken[]
+  invitationsSent        Invitation[]
+  appAssignments         UserAppAssignment[]
+  notificationPreference NotificationPreference?
+  mfaFactor              MfaFactor?
+  recoveryCodes          MfaRecoveryCode[]
+  mfaChallenges          MfaChallenge[]
 
   @@map("users")
 }
@@ -365,6 +366,7 @@ model ConnectedApp {
   legalHolds         LegalHold[]
   erasureRuns        ErasureRun[]
   alerts             Alert[]
+  alertMutes         AlertMute[]
   webhookDeliveries  WebhookDelivery[]
   responseActions    ResponseAction[]
   assignments        UserAppAssignment[]
@@ -999,25 +1001,35 @@ enum AlertStatus {
 // alert is open or in review adds an occurrence (partial unique index in the
 // migration). summary holds ids, counts and countries, never emails or IPs.
 model Alert {
-  id           String        @id @default(uuid(7)) @db.Uuid
-  appId        String        @map("app_id") @db.Uuid
-  rule         String
-  severity     AuditSeverity
-  status       AlertStatus   @default(open)
-  groupKey     String        @map("group_key")
-  subject      String?
-  title        String
-  summary      Json
-  occurrences  Int           @default(1)
-  firstSeenAt  DateTime      @map("first_seen_at") @db.Timestamptz(3)
-  lastSeenAt   DateTime      @map("last_seen_at") @db.Timestamptz(3)
-  assigneeId   String?       @map("assignee_id") @db.Uuid
-  resolvedAt   DateTime?     @map("resolved_at") @db.Timestamptz(3)
-  resolvedById String?       @map("resolved_by_id") @db.Uuid
+  id               String        @id @default(uuid(7)) @db.Uuid
+  appId            String        @map("app_id") @db.Uuid
+  rule             String
+  severity         AuditSeverity
+  status           AlertStatus   @default(open)
+  groupKey         String        @map("group_key")
+  subject          String?
+  title            String
+  summary          Json
+  occurrences      Int           @default(1)
+  firstSeenAt      DateTime      @map("first_seen_at") @db.Timestamptz(3)
+  lastSeenAt       DateTime      @map("last_seen_at") @db.Timestamptz(3)
+  assigneeId       String?       @map("assignee_id") @db.Uuid
+  resolvedAt       DateTime?     @map("resolved_at") @db.Timestamptz(3)
+  resolvedById     String?       @map("resolved_by_id") @db.Uuid
   // Optimistic concurrency for status and assignee changes.
-  version      Int           @default(0)
-  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version          Int           @default(0)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  // Who first took it on (Acknowledge, or the move to in_review): its
+  // escalation stops there.
+  acknowledgedAt   DateTime?     @map("acknowledged_at") @db.Timestamptz(3)
+  acknowledgedById String?       @map("acknowledged_by_id") @db.Uuid
+  // Escalation while nobody acknowledges it (escalation_policies): how many
+  // times so far, when last, and the time it counts from (its creation, or
+  // its reopening).
+  escalations      Int           @default(0)
+  escalationBaseAt DateTime      @default(now()) @map("escalation_base_at") @db.Timestamptz(3)
+  lastEscalatedAt  DateTime?     @map("last_escalated_at") @db.Timestamptz(3)
 
   app        ConnectedApp    @relation(fields: [appId], references: [id], onDelete: Restrict)
   activities AlertActivity[]
@@ -1025,7 +1037,76 @@ model Alert {
 
   @@index([appId, status, lastSeenAt(sort: Desc)])
   @@index([assigneeId])
+  // The live stream's changes, in order (alerts/alert-stream.service.ts).
+  @@index([updatedAt, id])
+  // A rule's new alerts in an application in the last hour (the flood cap).
+  @@index([appId, rule, createdAt])
   @@map("alerts")
+}
+
+// A silence of an application's alerts, of one rule or all of them, until a
+// time: the alerts are still raised, kept and shown; only nobody is notified
+// (email, chat, escalation, the panel's sounds and browser notices).
+model AlertMute {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  appId       String    @map("app_id") @db.Uuid
+  // null: every rule of the application.
+  rule        String?
+  reason      String
+  until       DateTime  @db.Timestamptz(3)
+  createdById String    @map("created_by_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  // Lifted before its time, by whom.
+  endedAt     DateTime? @map("ended_at") @db.Timestamptz(3)
+  endedById   String?   @map("ended_by_id") @db.Uuid
+
+  app ConnectedApp @relation(fields: [appId], references: [id], onDelete: Restrict)
+
+  @@index([appId, until])
+  @@map("alert_mutes")
+}
+
+// An administrator's settings of a detection rule (alerts/rule-catalog.ts):
+// on or off, a severity in place of its own, its parameters within the
+// catalog's bounds. A rule without a row runs with its defaults.
+model DetectionRuleSetting {
+  rule        String         @id
+  enabled     Boolean        @default(true)
+  severity    AuditSeverity?
+  params      Json           @default("{}")
+  updatedById String?        @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("detection_rule_settings")
+}
+
+// Escalation of the alerts nobody acknowledged, per severity: after how
+// long, how often again, how many times at most, and through which channels
+// (email to the administrators and the application's auditors, the chat
+// channels). One row per severity, written by the migration.
+model EscalationPolicy {
+  severity           AuditSeverity @id
+  enabled            Boolean
+  firstAfterMinutes  Int           @map("first_after_minutes")
+  repeatEveryMinutes Int           @map("repeat_every_minutes")
+  maxEscalations     Int           @map("max_escalations")
+  channels           String[]
+  updatedById        String?       @map("updated_by_id") @db.Uuid
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("escalation_policies")
+}
+
+// A person's notification preferences in the panel (sounds, browser
+// notices, silences): account/notification-preferences.ts validates them.
+model NotificationPreference {
+  userId      String   @id @map("user_id") @db.Uuid
+  preferences Json
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
 }
 
 // History of an alert: created, occurrence, status, assignment, note,

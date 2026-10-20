@@ -84,8 +84,11 @@ export function deviceLabel(parts: {
 export function explainAlert(
   alert: ExplainedAlert,
   names: ReadonlyMap<string, string> = new Map(),
+  /** The rule's parameters as configured now (rule-settings.service.ts); its defaults otherwise. */
+  params: Readonly<Record<string, number>> = {},
 ): AlertExplanation {
   const { summary } = alert;
+  const param = (name: string, fallback: number) => params[name] ?? fallback;
   const who = (id: string | undefined): string => {
     if (id === undefined) return 'an unknown user';
     const name = names.get(id);
@@ -100,10 +103,10 @@ export function explainAlert(
         ? summary.signals.filter((signal): signal is string => typeof signal === 'string')
         : [];
       return {
-        looksFor: `A successful sign-in unlike the account's usual ones: a new device or country, travel faster than ${numbers.format(IMPOSSIBLE_SPEED_KMH)} km/h, an address of a hosting provider, or a device more than ${numbers.format(LOCATION_MISMATCH_KM)} km from its address. Never an account's first sign-in.`,
+        looksFor: `A successful sign-in unlike the account's usual ones: a new device or country, travel faster than ${numbers.format(param('impossibleSpeedKmh', IMPOSSIBLE_SPEED_KMH))} km/h, an address of a hosting provider, or a device more than ${numbers.format(param('locationMismatchKm', LOCATION_MISMATCH_KM))} km from its address. Never an account's first sign-in.`,
         saw: [
           `${capitalized(who(subject))} signed in successfully.`,
-          ...signals.map((signal) => signalSaid(signal, summary)),
+          ...signals.map((signal) => signalSaid(signal, summary, params)),
         ],
       };
     }
@@ -116,7 +119,7 @@ export function explainAlert(
           ? undefined
           : Math.floor((alert.lastSeenAt.getTime() - lastAt.getTime()) / DAY_MS));
       return {
-        looksFor: `A sign-in after ${many(DORMANT_DAYS, 'day')} or more without any activity of the account: a forgotten account is a favourite target.`,
+        looksFor: `A sign-in after ${many(param('days', DORMANT_DAYS), 'day')} or more without any activity of the account: a forgotten account is a favourite target.`,
         saw: [
           days === undefined
             ? `${capitalized(who(subject))} signed in after a long time without activity.`
@@ -146,7 +149,7 @@ export function explainAlert(
     case 'brute_force_account': {
       const failures = count('failures');
       return {
-        looksFor: `${numbers.format(BRUTE_FORCE_ACCOUNT)} or more failed sign-ins of one account within ${WINDOW}: someone guessing its password.`,
+        looksFor: `${numbers.format(param('failures', BRUTE_FORCE_ACCOUNT))} or more failed sign-ins of one account within ${WINDOW}: someone guessing its password.`,
         saw: [
           `${failures === undefined ? 'Failed sign-ins' : capitalized(many(failures, 'failed sign-in'))} of ${alert.subject === null ? "one account (known here only by its email address's pseudonym)" : who(alert.subject)} within ${WINDOW}.`,
         ],
@@ -160,8 +163,8 @@ export function explainAlert(
       return {
         looksFor:
           alert.rule === 'brute_force_ip'
-            ? `${numbers.format(BRUTE_FORCE_IP)} or more failed sign-ins from one address within ${WINDOW}.`
-            : `Sign-ins of ${numbers.format(STUFFING_ACCOUNTS)} or more accounts failing from one address within ${WINDOW}: someone trying leaked passwords.`,
+            ? `${numbers.format(param('failures', BRUTE_FORCE_IP))} or more failed sign-ins from one address within ${WINDOW}.`
+            : `Sign-ins of ${numbers.format(param('accounts', STUFFING_ACCOUNTS))} or more accounts failing from one address within ${WINDOW}: someone trying leaked passwords.`,
         saw: [
           `${failures === undefined ? 'Failed sign-ins' : capitalized(many(failures, 'failed sign-in'))}${accounts === undefined ? '' : ` of ${many(accounts, 'account')}`} from one address within ${WINDOW}.`,
           ...addressSaid(source),
@@ -172,7 +175,7 @@ export function explainAlert(
       const failures = count('failures');
       const applications = count('applications');
       return {
-        looksFor: `One address failing ${numbers.format(MULTI_APP_FAILURES)} or more sign-ins against ${numbers.format(MULTI_APP_APPS)} or more connected applications within ${WINDOW} (those that share their signals).`,
+        looksFor: `One address failing ${numbers.format(param('failures', MULTI_APP_FAILURES))} or more sign-ins against ${numbers.format(param('applications', MULTI_APP_APPS))} or more connected applications within ${WINDOW} (those that share their signals).`,
         saw: [
           `${failures === undefined ? 'Failed sign-ins' : capitalized(many(failures, 'failed sign-in'))} in this application from one address that fails against ${applications === undefined ? 'other applications too' : `${many(applications, 'connected application')} in all`}.`,
           ...addressSaid(text(summary.source)),
@@ -182,7 +185,8 @@ export function explainAlert(
     case 'mass_export':
     case 'mass_delete':
     case 'mass_read': {
-      const [threshold, noun, plural] = MASS[alert.rule];
+      const [fallback, noun, plural] = MASS[alert.rule];
+      const threshold = param('count', fallback);
       const found = count('count');
       return {
         looksFor: `${numbers.format(threshold)} or more ${plural} by one user within ${WINDOW}.`,
@@ -195,9 +199,63 @@ export function explainAlert(
       const accounts = count('accounts');
       const session = text(summary.session);
       return {
-        looksFor: `One session used by ${numbers.format(TOKEN_REUSE_ACCOUNTS)} or more accounts within an hour: a session stolen or shared.`,
+        looksFor: `One session used by ${numbers.format(param('accounts', TOKEN_REUSE_ACCOUNTS))} or more accounts within an hour: a session stolen or shared.`,
         saw: [
           `${accounts === undefined ? 'Several accounts' : capitalized(many(accounts, 'account'))} used the same session${session === undefined ? '' : ` (reference ${session}…)`} within an hour.`,
+        ],
+      };
+    }
+    case 'source_silent': {
+      const minutesSilent = count('silentMinutes');
+      const timeout = count('timeoutSeconds');
+      return {
+        looksFor:
+          "No heartbeat from any instance of the application's connector for longer than its heartbeat timeout, after one was seen. Resolved by itself when one arrives.",
+        saw: [
+          `No heartbeat ${minutesSilent === undefined ? 'for a while' : `for ${duration(minutesSilent)}`}${timeout === undefined ? '' : ` (the timeout is ${many(timeout, 'second')})`}: the connector stopped, or cannot reach Audit Hub. Its events wait in its queue, or are lost if it was stopped for good.`,
+        ],
+      };
+    }
+    case 'source_backlog': {
+      const age = count('oldestAgeSeconds');
+      const queued = count('queueSize');
+      const retrying = count('retrying');
+      return {
+        looksFor: `A connector whose oldest queued event has waited longer than ${many(param('oldestAgeSeconds', 900), 'second')} (it says so in its heartbeats). Resolved by itself when the queue drains.`,
+        saw: [
+          `${queued === undefined ? 'Events' : capitalized(many(queued, 'event'))} queued, the oldest waiting ${age === undefined ? 'too long' : duration(Math.round(age / 60))}${retrying === undefined || retrying === 0 ? '' : `, ${many(retrying, 'event')} being retried`}: delayed, not lost.`,
+        ],
+      };
+    }
+    case 'ingest_rejections': {
+      const rejected = count('rejected');
+      const reasons = Array.isArray(summary.reasons)
+        ? summary.reasons.filter((reason): reason is string => typeof reason === 'string')
+        : [];
+      return {
+        looksFor: `${numbers.format(param('count', 20))} or more events refused by validation within 15 minutes. Resolved by itself when they stop.`,
+        saw: [
+          `${rejected === undefined ? 'Events' : capitalized(many(rejected, 'event'))} refused within 15 minutes${reasons.length === 0 ? '' : `, for: ${reasons.join(', ')}`}. A refused event is never stored: the application's connector logs which.`,
+        ],
+      };
+    }
+    case 'coverage_gap': {
+      const missing = count('missingEvents');
+      const gaps = count('gaps');
+      return {
+        looksFor: `Events the connector numbered that have not arrived, missing for longer than ${many(param('graceMinutes', 10), 'minute')}: a loss of coverage inferred from the sequence numbers, never from silence. Resolved by itself when they arrive.`,
+        saw: [
+          `${missing === undefined ? 'Events' : capitalized(many(missing, 'event'))} missing${gaps === undefined ? '' : ` in ${many(gaps, 'gap')}`} of the sequence: numbered by the connector, never received.`,
+        ],
+      };
+    }
+    case 'integrity_failure': {
+      const failures = count('failures');
+      return {
+        looksFor:
+          'A verification of the log that found records not matching their hash, their seal or their chain. Never resolved by itself.',
+        saw: [
+          `${failures === undefined ? 'Records' : capitalized(many(failures, 'record'))} that do not match: possible tampering, or a fault to explain. The verification's report (Integrity) names each; the events behind this alert are its sample.`,
         ],
       };
     }
@@ -207,7 +265,11 @@ export function explainAlert(
 }
 
 /** One signal of a suspicious sign-in in words, with the figures the rule kept. */
-function signalSaid(signal: string, summary: Record<string, unknown>): string {
+function signalSaid(
+  signal: string,
+  summary: Record<string, unknown>,
+  params: Readonly<Record<string, number>>,
+): string {
   switch (signal) {
     case 'new_device': {
       const device = deviceLabel(summary);
@@ -222,14 +284,14 @@ function signalSaid(signal: string, summary: Record<string, unknown>): string {
       const minutes = num(summary.travelMinutes);
       const speed = num(summary.travelSpeedKmh);
       return km === undefined || minutes === undefined || speed === undefined
-        ? `Impossible travel: too far from where the account was shortly before to have got there (faster than ${numbers.format(IMPOSSIBLE_SPEED_KMH)} km/h).`
+        ? `Impossible travel: too far from where the account was shortly before to have got there (faster than ${numbers.format(params.impossibleSpeedKmh ?? IMPOSSIBLE_SPEED_KMH)} km/h).`
         : `Impossible travel: ${numbers.format(km)} km from where the account was ${duration(minutes)} before, ${numbers.format(speed)} km/h (faster than an airliner).`;
     }
     case 'hosting_ip':
       return 'Hosting address: one of a hosting provider (a server, a VPN or a proxy), not of a home, an office or a phone network.';
     case 'location_mismatch': {
       const km = num(summary.mismatchKm);
-      return `Location mismatch: the device said it was ${km === undefined ? `more than ${numbers.format(LOCATION_MISMATCH_KM)} km` : `${numbers.format(km)} km`} from where its address is.`;
+      return `Location mismatch: the device said it was ${km === undefined ? `more than ${numbers.format(params.locationMismatchKm ?? LOCATION_MISMATCH_KM)} km` : `${numbers.format(km)} km`} from where its address is.`;
     }
     default:
       return `${capitalized(signal.replaceAll('_', ' '))}.`;

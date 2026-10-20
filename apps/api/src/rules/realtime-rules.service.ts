@@ -6,6 +6,7 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { AlertsService } from '../alerts/alerts.service.js';
+import { RuleSettingsService, type RuleSettingsSnapshot } from '../alerts/rule-settings.service.js';
 import { errorSummary } from '../common/logging/error-summary.js';
 import { SYSTEM_APP_ID } from '../connected-apps/connected-apps.service.js';
 import { EnrichmentService } from '../enrichment/enrichment.service.js';
@@ -17,7 +18,7 @@ import { RESULTS, ResponseActionsService } from '../response-actions/response-ac
 import { WebhookOutboxService } from '../webhooks/webhook-outbox.service.js';
 import type { Place } from './geo.js';
 import { REALTIME_BATCH, REALTIME_HORIZON_MS, REALTIME_INTERVAL_MS } from './rules.constants.js';
-import { signInSeverity, signInSignals } from './sign-in-signals.js';
+import { DEFAULT_SIGN_IN_THRESHOLDS, signInSeverity, signInSignals } from './sign-in-signals.js';
 import { blockOf, isBlocked } from '../explorer/blocked.js';
 
 export const REALTIME_CURSOR = 'realtime';
@@ -90,6 +91,7 @@ export class RealtimeRulesService implements OnApplicationBootstrap, OnModuleDes
     private readonly webhooks: WebhookOutboxService,
     private readonly responseActions: ResponseActionsService,
     private readonly enrichment: EnrichmentService,
+    private readonly settings: RuleSettingsService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -146,7 +148,8 @@ export class RealtimeRulesService implements OnApplicationBootstrap, OnModuleDes
           cursor?.eventPk ?? ZERO_UUID,
           lock.horizon,
         );
-        for (const event of events) await this.evaluate(tx, event);
+        const settings = await this.settings.snapshot();
+        for (const event of events) await this.evaluate(tx, event, settings);
         const last = events.at(-1);
         if (last !== undefined) {
           await tx.ruleCursor.upsert({
@@ -187,7 +190,8 @@ export class RealtimeRulesService implements OnApplicationBootstrap, OnModuleDes
   }
 
   /** The rules for one event, in the batch's transaction. */
-  async evaluate(tx: Tx, event: RuleEvent): Promise<void> {
+  async evaluate(tx: Tx, event: RuleEvent, given?: RuleSettingsSnapshot): Promise<void> {
+    const settings = given ?? (await this.settings.snapshot());
     // Audit Hub's own events have no published catalog: their tags are in code.
     const tags = new Set(
       event.appId === SYSTEM_APP_ID && event.tags.length === 0
@@ -235,7 +239,7 @@ export class RealtimeRulesService implements OnApplicationBootstrap, OnModuleDes
       where: { appId_actorId: { appId: event.appId, actorId } },
     });
     const signIn = tags.has('auth.sign_in') && event.outcome === 'success';
-    if (signIn) await this.signIn(tx, event, actorId, profile);
+    if (signIn) await this.signIn(tx, event, actorId, profile, settings);
     await this.remember(tx, event, actorId, profile, signIn);
   }
 
@@ -244,7 +248,11 @@ export class RealtimeRulesService implements OnApplicationBootstrap, OnModuleDes
     event: RuleEvent,
     actorId: string,
     profile: Prisma.ActorProfileGetPayload<object> | null,
+    settings: RuleSettingsSnapshot,
   ): Promise<void> {
+    const suspicious = settings.of('suspicious_sign_in');
+    const dormantRule = settings.of('dormant_account');
+    if (!suspicious.enabled && !dormantRule.enabled) return;
     const where = { appId: event.appId, actorId };
     const deviceKey = deviceKeyOf(event);
     const [devices, knownDevice, countries, knownCountry] = await Promise.all([
@@ -264,32 +272,42 @@ export class RealtimeRulesService implements OnApplicationBootstrap, OnModuleDes
           }),
     ]);
     const lastSeenAt = profile?.lastSeenAt ?? (await this.lastActivityBefore(tx, event, actorId));
-    const verdict = signInSignals({
-      at: event.recordedAt,
-      knownDevice: deviceKey === null || knownDevice !== null,
-      hasDevices: devices > 0,
-      country: event.geoCountry,
-      knownCountry: knownCountry !== null,
-      hasCountries: countries > 0,
-      ipPlace: ipPlaceOf(event),
-      devicePlace: devicePlaceOf(event),
-      previous:
-        profile?.lastLatitude === null ||
-        profile?.lastLatitude === undefined ||
-        profile.lastLongitude === null ||
-        profile.lastLocationAt === null
-          ? null
-          : {
-              latitude: Number(profile.lastLatitude),
-              longitude: Number(profile.lastLongitude),
-              accuracyKm: profile.lastAccuracyKm ?? 0,
-              at: profile.lastLocationAt,
-            },
-      hostingIp: this.enrichment.isHosting(event.geoAsn),
-      lastSeenAt,
-    });
+    const verdict = signInSignals(
+      {
+        at: event.recordedAt,
+        knownDevice: deviceKey === null || knownDevice !== null,
+        hasDevices: devices > 0,
+        country: event.geoCountry,
+        knownCountry: knownCountry !== null,
+        hasCountries: countries > 0,
+        ipPlace: ipPlaceOf(event),
+        devicePlace: devicePlaceOf(event),
+        previous:
+          profile?.lastLatitude === null ||
+          profile?.lastLatitude === undefined ||
+          profile.lastLongitude === null ||
+          profile.lastLocationAt === null
+            ? null
+            : {
+                latitude: Number(profile.lastLatitude),
+                longitude: Number(profile.lastLongitude),
+                accuracyKm: profile.lastAccuracyKm ?? 0,
+                at: profile.lastLocationAt,
+              },
+        hostingIp: this.enrichment.isHosting(event.geoAsn),
+        lastSeenAt,
+      },
+      {
+        impossibleSpeedKmh:
+          suspicious.params.impossibleSpeedKmh ?? DEFAULT_SIGN_IN_THRESHOLDS.impossibleSpeedKmh,
+        locationMismatchKm:
+          suspicious.params.locationMismatchKm ?? DEFAULT_SIGN_IN_THRESHOLDS.locationMismatchKm,
+        dormantDays: dormantRule.params.days ?? DEFAULT_SIGN_IN_THRESHOLDS.dormantDays,
+      },
+    );
 
-    if (verdict.signals.length > 0) {
+    // A rule turned off detects nothing: no alert, and no "Was it you?" either.
+    if (suspicious.enabled && verdict.signals.length > 0) {
       await this.alerts.raise(tx, {
         appId: event.appId,
         rule: 'suspicious_sign_in',
@@ -338,7 +356,7 @@ export class RealtimeRulesService implements OnApplicationBootstrap, OnModuleDes
         tx,
       );
     }
-    if (verdict.dormant) {
+    if (dormantRule.enabled && verdict.dormant) {
       await this.alerts.raise(tx, {
         appId: event.appId,
         rule: 'dormant_account',

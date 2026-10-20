@@ -236,4 +236,70 @@ describe('explainAlert', () => {
       saw: [],
     });
   });
+
+  it("tells the sources' conditions and the log's integrity, with their figures", () => {
+    expect(
+      explainAlert(alert('source_silent', { silentMinutes: 125, timeoutSeconds: 300 }, null)).saw,
+    ).toEqual([
+      'No heartbeat for 2 hours (the timeout is 300 seconds): the connector stopped, or cannot reach Audit Hub. Its events wait in its queue, or are lost if it was stopped for good.',
+    ]);
+    expect(
+      saw(alert('source_backlog', { queueSize: 40, oldestAgeSeconds: 1800, retrying: 3 }, null)),
+    ).toEqual([
+      '40 events queued, the oldest waiting 30 minutes, 3 events being retried: delayed, not lost.',
+    ]);
+    expect(
+      saw(
+        alert(
+          'ingest_rejections',
+          { rejected: 25, reasons: ['schema_invalid: 20', 'too_large: 5'] },
+          null,
+        ),
+      ),
+    ).toEqual([
+      "25 events refused within 15 minutes, for: schema_invalid: 20, too_large: 5. A refused event is never stored: the application's connector logs which.",
+    ]);
+    expect(saw(alert('coverage_gap', { missingEvents: 12, gaps: 2 }, null))).toEqual([
+      '12 events missing in 2 gaps of the sequence: numbered by the connector, never received.',
+    ]);
+    expect(saw(alert('integrity_failure', { failures: 3 }, null))).toEqual([
+      "3 records that do not match: possible tampering, or a fault to explain. The verification's report (Integrity) names each; the events behind this alert are its sample.",
+    ]);
+    // Older summaries without figures: less said, nothing wrong.
+    expect(saw(alert('source_silent', {}, null))[0]).toMatch(/^No heartbeat for a while:/);
+    expect(saw(alert('source_backlog', {}, null))[0]).toMatch(
+      /^Events queued, the oldest waiting too long/,
+    );
+    expect(saw(alert('ingest_rejections', {}, null))[0]).toMatch(
+      /^Events refused within 15 minutes\. /,
+    );
+    expect(saw(alert('coverage_gap', {}, null))[0]).toMatch(/^Events missing of the sequence/);
+    expect(saw(alert('integrity_failure', {}, null))[0]).toMatch(/^Records that do not match/);
+  });
+
+  it('says what a rule looks for with the thresholds an administrator set', () => {
+    expect(
+      explainAlert(alert('brute_force_account', { failures: 30 }), NAMES, { failures: 25 })
+        .looksFor,
+    ).toMatch(/^25 or more failed sign-ins of one account/);
+    expect(explainAlert(alert('dormant_account', {}), NAMES, { days: 30 }).looksFor).toMatch(
+      /after 30 days or more/,
+    );
+    expect(explainAlert(alert('mass_read', {}), NAMES, { count: 200 }).looksFor).toMatch(
+      /^200 or more reads/,
+    );
+    expect(
+      explainAlert(alert('source_backlog', {}, null), NAMES, { oldestAgeSeconds: 120 }).looksFor,
+    ).toMatch(/longer than 120 seconds/);
+    const travel = explainAlert(
+      alert('suspicious_sign_in', { signals: ['impossible_travel', 'location_mismatch'] }),
+      NAMES,
+      { impossibleSpeedKmh: 1200, locationMismatchKm: 100 },
+    );
+    expect(travel.looksFor).toContain('faster than 1,200 km/h');
+    expect(travel.saw.slice(1)).toEqual([
+      'Impossible travel: too far from where the account was shortly before to have got there (faster than 1,200 km/h).',
+      'Location mismatch: the device said it was more than 100 km from where its address is.',
+    ]);
+  });
 });
