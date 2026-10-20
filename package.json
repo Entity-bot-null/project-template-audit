@@ -1,6 +1,6 @@
 {
   "name": "project-template-audit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Audit Hub: an independent audit and monitoring platform that applications send their events to through connectors.",
   "type": "module",
