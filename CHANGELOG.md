@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/Entity-bot-null/project-template-audit/compare/v0.2.0...v0.2.1) (2026-10-20)
+
+
+### Bug fixes
+
+* **security:** resolve the code scanning findings ([#17](https://github.com/Entity-bot-null/project-template-audit/issues/17)) ([40008de](https://github.com/Entity-bot-null/project-template-audit/commit/40008def0c239d52a5d718b314de61d8d0a5939c))
+
 ## [0.2.0](https://github.com/Entity-bot-null/project-template-audit/compare/v0.1.0...v0.2.0) (2026-10-19)
 
 
