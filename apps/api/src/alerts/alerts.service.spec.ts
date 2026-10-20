@@ -72,6 +72,8 @@ const alertRow = (overrides: Record<string, unknown> = {}) => ({
   acknowledgedAt: null as Date | null,
   acknowledgedById: null as string | null,
   escalations: 0,
+  lastEscalatedAt: null as Date | null,
+  createdAt: AT,
   updatedAt: AT,
   version: 0,
   activities: [],

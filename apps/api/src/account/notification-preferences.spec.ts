@@ -47,11 +47,18 @@ describe('notification preferences', () => {
   });
 
   it('keeps each severity once, a volume from 0 to 100, a repeat of at most 10 times', () => {
-    const parsed = NotificationPreferencesSchema.parse({
-      ...DEFAULT_NOTIFICATION_PREFERENCES,
-      sound: { enabled: true, volume: 30, severities: ['high', 'high', 'critical'] },
-    });
-    expect(parsed.sound.severities).toEqual(['high', 'critical']);
+    expect(
+      NotificationPreferencesSchema.safeParse({
+        ...DEFAULT_NOTIFICATION_PREFERENCES,
+        sound: { enabled: true, volume: 30, severities: ['high', 'high', 'critical'] },
+      }).success,
+    ).toBe(false);
+    expect(
+      NotificationPreferencesSchema.parse({
+        ...DEFAULT_NOTIFICATION_PREFERENCES,
+        sound: { enabled: true, volume: 30, severities: ['high', 'critical'] },
+      }).sound.severities,
+    ).toEqual(['high', 'critical']);
     expect(
       NotificationPreferencesSchema.safeParse({
         ...DEFAULT_NOTIFICATION_PREFERENCES,

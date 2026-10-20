@@ -65,8 +65,11 @@ export const AlertSchema = z.object({
   /** Who first took it on (Acknowledge, or In review): its escalation stopped there. */
   acknowledgedAt: z.iso.datetime().nullable(),
   acknowledgedById: z.uuid().nullable(),
-  /** How many times it was escalated while nobody acknowledged it. */
+  /** How many times it was escalated while nobody acknowledged it, the last one when. */
   escalations: z.int(),
+  lastEscalatedAt: z.iso.datetime().nullable(),
+  /** When Audit Hub opened it (firstSeenAt is when its first detection happened). */
+  createdAt: z.iso.datetime(),
   /** Until when a silence covers it (nobody is notified); null when none does. */
   mutedUntil: z.iso.datetime().nullable(),
   /** The last change of it, any change: the live stream's order. */

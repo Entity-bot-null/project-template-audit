@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import type { Page } from '@playwright/test';
+import { registerApplication } from './support/apps.js';
 import { expect, test } from './support/fixtures.js';
-import { credentialsOf, ingest } from './support/ingest.js';
-import { ADMIN, nextCode, SEED_TOTP_SECRET, signIn } from './support/session.js';
+import { ingest } from './support/ingest.js';
+import { ADMIN, signIn } from './support/session.js';
 
 // The admin pages in a real browser, through the real ingestion: an
 // administrator registers an application (after a step-up), the application
@@ -16,14 +15,6 @@ const PAYLOADS = [
   '" onmouseover="window.__xss = 1',
   'javascript:alert(1)',
 ] as const;
-
-async function confirmItIsMe(page: Page) {
-  const dialog = page.getByRole('dialog', { name: 'Confirm it is you' });
-  await expect(dialog).toBeVisible();
-  await dialog.getByLabel('Password', { exact: true }).fill(ADMIN.password);
-  await dialog.getByLabel('Code', { exact: true }).fill(await nextCode(SEED_TOTP_SECRET));
-  await dialog.getByRole('button', { name: 'Confirm' }).click();
-}
 
 test('an administrator registers an application, whose events the explorer shows as text', async ({
   page,
@@ -39,20 +30,7 @@ test('an administrator registers an application, whose events the explorer shows
   await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
 
   // Register: the step-up first, then the secrets, shown once.
-  const slug = `shop-${randomUUID().slice(0, 8)}`;
-  await page.getByRole('link', { name: 'Applications' }).click();
-  await page.getByRole('link', { name: 'Register an application' }).click();
-  await page.getByLabel('Name').fill('Shop');
-  await page.getByLabel('Slug').fill(slug);
-  await page.getByRole('button', { name: 'Register' }).click();
-  await confirmItIsMe(page);
-  await expect(page.getByRole('heading', { name: 'Shop is registered' })).toBeVisible();
-  const credentials = credentialsOf(
-    (await page.getByTestId('secret-variables').textContent()) ?? '',
-  );
-  await page.getByRole('checkbox', { name: 'I have stored them' }).check();
-  await page.getByRole('button', { name: 'Go to the application' }).click();
-  await expect(page.getByRole('heading', { name: 'Shop', exact: true })).toBeVisible();
+  const { credentials } = await registerApplication(page, 'Shop');
 
   // The application sends its log, with hostile text wherever text goes.
   const api = await playwright.request.newContext({ baseURL });

@@ -962,16 +962,22 @@ appear in the admin pages and go to the application's webhook. Three integration
 all off until configured:
 
 - **Email:** with email on (11.5), each new alert of high or critical severity is sent to the
-  administrators and to the auditors assigned to its application (ids and the rule only).
+  administrators and to the auditors assigned to its application (ids and the rule only); one
+  nobody acknowledges is sent again as its severity's escalation says (under Detection rules: by
+  default critical after 15 minutes, high after an hour).
 - **Slack or Teams:** `AUDIT_SLACK_WEBHOOK_URL` (an incoming webhook of a Slack channel) or
   `AUDIT_TEAMS_WEBHOOK_URL` (a Teams workflow started by "when a Teams webhook request is
   received", which posts the Adaptive Card it gets): new alerts from medium severity, with a link
-  to the alert when `APP_ORIGIN` is set. Both are secrets; https only.
+  to the alert when `APP_ORIGIN` is set, and their escalations. Both are secrets; https only.
 - **IP geolocation:** `GEOIP_CITY_DB_PATH` and `GEOIP_ASN_DB_PATH` name `.mmdb` files (DB-IP
   Lite City and ASN, monthly, CC BY 4.0; [deploy-vps.md](deploy-vps.md#ip-geolocation) says how to
   download them), and `GEOIP_HOSTING_ASNS_PATH` an optional list of hosting and VPN ASNs. Without
   them the country, travel and hosting rules do not run. Check what is loaded, and what it says of
   an address: `pnpm --filter api audit geoip --ip 8.8.8.8`.
+
+A silence (from an alert's page, [11.8](#118-audit-hub-the-admin-pages)) holds email, chat and
+escalation for a while; the alert is still raised, counted and shown. No new variable is needed
+for any of this, nor for the panel's live alerts.
 
 An application's webhooks are tested from its page in the admin pages, or with
 `POST /api/connected-apps/:id/webhook-test`; every delivery, with its last HTTP status and the
@@ -1018,19 +1024,22 @@ without the phone ([security.md](security.md#second-factor-and-recent-authentica
 
 What each role sees after signing in ([ADR 0014](adr/0014-build-the-admin-pages-lazily-with-own-svg-charts.md)):
 
-| Page                                                                     | Who                    | What it does                                                                                                                                                                                                                                                     |
-| ------------------------------------------------------------------------ | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Overview (`/`)                                                           | viewer, auditor, admin | at a glance: the log's integrity, open alerts, high-risk events in 24 h; quick response actions on an application's user (admin); then every visible application: events in 24 h with their trend, rejections, open alerts, heartbeat, gaps                      |
-| Events (`/events`)                                                       | viewer, auditor, admin | the explorer: each event at a glance (date and time, actor, action in words, application, outcome, risk) and its whole detail in a side panel, loaded when opened; filters in the URL (risk among them), newest first, a page at a time; export (auditor, admin) |
-| An event (`/events/:id`)                                                 | viewer, auditor, admin | every section (actor, network and location, request, client, audit and integrity with its content hash and seal, resource), the change and the details as highlighted JSON, the same request                                                                     |
-| A user (`/apps/:app/actors/:id`)                                         | viewer, auditor, admin | what they did and what was done to them; erasure of their personal data or events (admin, step-up)                                                                                                                                                               |
-| A resource (`/apps/:app/resources/...`)                                  | viewer, auditor, admin | its history                                                                                                                                                                                                                                                      |
-| Security (`/security`)                                                   | viewer, auditor, admin | failed sign-ins by day, addresses, countries, a day × hour heatmap, open anomalies                                                                                                                                                                               |
-| Alerts (`/alerts`)                                                       | viewer, auditor, admin | the rules' alerts, each with who it is about by name, and its whole detail in a side panel, loaded when opened; filters in the URL, a page at a time                                                                                                             |
-| An alert (`/alerts/:id`)                                                 | viewer, auditor, admin | why it fired in words, what its events show (how they ended and why, accounts, countries, devices), who it is about and who works on it by name, the events behind it, its history; review it (auditor, admin), ask the application to act (admin)               |
-| Response actions, Applications, Retention, Integrity, Users, Invitations | admin                  | approvals, keys and webhooks, the end of a service, retention and legal holds, seals, accounts                                                                                                                                                                   |
-| Exports (`/exports`)                                                     | auditor, admin         | the exports made, with the digest to check a copy                                                                                                                                                                                                                |
-| Account (`/account`)                                                     | everyone               | password, email, second factor and new recovery codes                                                                                                                                                                                                            |
+| Page                                                                     | Who                    | What it does                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Overview (`/`)                                                           | viewer, auditor, admin | at a glance: the log's integrity, open alerts, high-risk events in 24 h; quick response actions on an application's user (admin); then every visible application: events in 24 h with their trend, rejections, open alerts, heartbeat, gaps                                                                                                 |
+| Events (`/events`)                                                       | viewer, auditor, admin | the explorer: each event at a glance (date and time, actor, action in words, application, outcome, risk) and its whole detail in a side panel, loaded when opened; filters in the URL (risk among them), newest first, a page at a time; export (auditor, admin)                                                                            |
+| An event (`/events/:id`)                                                 | viewer, auditor, admin | every section (actor, network and location, request, client, audit and integrity with its content hash and seal, resource), the change and the details as highlighted JSON, the same request                                                                                                                                                |
+| A user (`/apps/:app/actors/:id`)                                         | viewer, auditor, admin | what they did and what was done to them; erasure of their personal data or events (admin, step-up)                                                                                                                                                                                                                                          |
+| A resource (`/apps/:app/resources/...`)                                  | viewer, auditor, admin | its history                                                                                                                                                                                                                                                                                                                                 |
+| Security (`/security`)                                                   | viewer, auditor, admin | failed sign-ins by day, addresses, countries, a day × hour heatmap, open anomalies                                                                                                                                                                                                                                                          |
+| Alerts (`/alerts`)                                                       | viewer, auditor, admin | the alert center: search (an id, a rule, words of the title, a user's id), filters (application, status, severity, rule, last seen from and to, silenced), sort and order, all in the URL, a page at a time; who each is about by name, whether it was escalated or is silenced; its whole detail in a side panel; current as alerts change |
+| An alert (`/alerts/:id`)                                                 | viewer, auditor, admin | why it fired in words, what its events show (how they ended and why, accounts, countries, devices), who it is about and who works on it by name, the events behind it, its history; acknowledge, review (a reason to close it), reopen and silence it (auditor, admin), ask the application to act (admin); current as it changes           |
+| SOC view (`/soc`)                                                        | viewer, auditor, admin | one screen to watch, full screen if asked: unresolved alerts by severity, the critical and high ones waiting, what changed just now, the sources' state, the log's integrity; by application or environment                                                                                                                                 |
+| Detection rules (`/detection-rules`)                                     | viewer, auditor, admin | what each rule looks for, its severity, grouping and thresholds, and the escalation by severity; tune them (admin, step-up)                                                                                                                                                                                                                 |
+| Response actions, Applications, Retention, Integrity, Users, Invitations | admin                  | approvals, keys and webhooks, the end of a service, retention and legal holds, seals, accounts                                                                                                                                                                                                                                              |
+| Exports (`/exports`)                                                     | auditor, admin         | the exports made, with the digest to check a copy                                                                                                                                                                                                                                                                                           |
+| Account (`/account`)                                                     | everyone               | password, email, second factor and new recovery codes                                                                                                                                                                                                                                                                                       |
+| Notifications (`/account/notifications`)                                 | viewer, auditor, admin | your alert sounds, browser notifications, quiet time and the applications you never hear about                                                                                                                                                                                                                                              |
 
 A sensitive action (an export, a key, a role, an erasure, a legal hold, a response action) asks
 for your password and a fresh code again when the last time was more than 5 minutes ago. Values
@@ -1086,6 +1095,50 @@ What it can say depends on what the application sends ([connection guide](audit/
 Reviewing it and asking the application to act are on its page ("Open as a page"). Alerts keep
 ids and counts only: the names are looked up when an alert is read, and each read is recorded in
 Audit Hub's own log, as a search of events is.
+
+**Live alerts.** Signed in as a viewer, an auditor or an administrator, the panel listens to
+Audit Hub (the header says so in words: Live, Connecting…, Reconnecting…, Offline): the counters,
+the lists and an alert's page change as alerts do, without a reload. A new alert, one whose
+severity rose and one escalated again show a notice at the bottom right (a critical one stays
+until dismissed), announced to screen readers too. With the panel open in several tabs, one of
+them plays the sound and shows the browser's notice: each alert is heard once
+([ADR 0016](adr/0016-deliver-alerts-live-tunable-and-escalating.md)).
+
+- **Sounds:** a different pattern per severity (critical and high sound by default). Browsers
+  play sound only after a click or a key on the page: until then the header offers "Enable
+  sound". Under Notifications: the severities that sound, the volume, each sound to try, and a
+  critical alert's sound again while nobody acknowledges it (every 60 seconds, 3 times by
+  default).
+- **Browser notifications:** off until you turn them on under Notifications and the browser
+  allows them ("Allow browser notifications"); only while a tab of the panel is open, with the
+  alert's severity, application and title. Blocked by the browser: allow them in its site
+  settings; the panel's own notices keep working.
+- **Quiet:** "Quiet for an hour" in the header (or 8 hours, a day, under Notifications) stops
+  sounds and notices until then; the applications you never want to hear about are chosen there
+  too. Quiet never acknowledges, resolves nor hides an alert.
+
+**Working an alert.** On its page, **Acknowledge** says you took it on (you become its assignee
+when nobody is) and stops its escalation; moving it to In review does the same. Resolving it, or
+closing it as a false positive, asks how or why (10 characters or more), kept in its history;
+**Reopen** brings a closed one back, its escalation starting over. **Silence** holds the
+notifications of its rule, or of every rule of its application, for 15 minutes to a week, with a
+reason: email, chat, escalation, sounds and browser notices. The silences in force are listed
+there, each with **Lift**. A silenced alert still opens, counts and shows ("Silenced" in the
+list).
+
+**The SOC view and the sources.** One screen to watch ("Full screen" for a wall): unresolved
+alerts by severity (open, in review, silenced, the longest waiting), the critical and high ones
+waiting, what changed since the page opened, and each source: Active; Idle (heartbeats, no recent
+events: not a problem); Delayed (events queued); Disconnected (no heartbeat within the
+application's timeout); Never connected; with its queue, the events refused in 15 minutes and
+those missing. A disconnected or delayed source, refused events and missing ones raise alerts
+too, resolved by themselves when they clear ([security.md](security.md#the-rules)).
+
+**Detection rules.** Every rule as this instance runs it, and the escalation of each severity. An
+administrator, after the step-up, turns a rule off, sets its severity or its thresholds within
+their bounds, and sets each severity's escalation: after how long, how often, how many times, by
+email and chat (the page says which of those this deployment can send). Changes apply within 30
+seconds and are recorded in Audit Hub's own log.
 
 ### 11.9 Audit Hub: connecting a project
 

@@ -36,6 +36,12 @@ browser ──HTTPS──▶ Caddy (TLS, HSTS) ──▶ web (nginx: the app, /a
                    ports 80/443            edge network only                       edge network only
 ```
 
+The panel's live alert stream (`GET /api/alerts/stream`, Server-Sent Events) passes both proxies
+as it is: nginx does not buffer it (the API answers `X-Accel-Buffering: no`), and Caddy flushes
+`text/event-stream` at once and leaves it uncompressed (`Cache-Control: no-transform`). A proxy
+or load balancer added in front must do the same and allow an idle read of 30 s or more (a
+keep-alive comes every 25 s) ([security.md](security.md#the-live-stream-and-the-panels-notices)).
+
 The **Deploy** workflow, with the repository variable `DEPLOY_TARGET=vps`:
 
 1. re-runs every gate on the commit (as for any target);

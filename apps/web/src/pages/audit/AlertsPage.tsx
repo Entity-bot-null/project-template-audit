@@ -5,9 +5,16 @@ import { call } from '../../api/errors';
 import { useVisibleApps } from '../../audit/apps';
 import { AppPicker } from '../../audit/AppPicker';
 import { Badge, PersonName } from '../../audit/EventTable';
-import { SelectField } from '../../audit/fields';
-import { asOptions, formatDateTime, formatNumber } from '../../audit/format';
+import { DateTimeField, SelectField } from '../../audit/fields';
+import {
+  asOptions,
+  formatDateTime,
+  formatNumber,
+  fromLocalInput,
+  toLocalInput,
+} from '../../audit/format';
 import { alertPath } from '../../audit/links';
+import { useLiveRefresh } from '../../audit/live/LiveContext';
 import { LoadView } from '../../audit/LoadView';
 import { OffsetPager } from '../../audit/Pager';
 import { TextField } from '../../components/TextField';
@@ -17,17 +24,43 @@ type AlertQuery = NonNullable<operations['AlertsController_list']['parameters'][
 
 const STATUSES = ['open', 'in_review', 'resolved', 'false_positive'] as const;
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
-const NAMES = ['appId', 'status', 'severity', 'rule'] as const;
+const SORTS = [
+  ['last_seen', 'Last seen'],
+  ['first_seen', 'First seen'],
+  ['severity', 'Severity'],
+  ['status', 'Status'],
+] as const;
+const NAMES = [
+  'appId',
+  'status',
+  'severity',
+  'rule',
+  'q',
+  'from',
+  'to',
+  'muted',
+  'sort',
+  'order',
+] as const;
 const PAGE_SIZE = 25;
+
+type Filters = Partial<Record<(typeof NAMES)[number], string>>;
+
+/** A silence covers it now. */
+const silenced = (mutedUntil: string | null) =>
+  mutedUntil !== null && Date.parse(mutedUntil) > Date.now();
 
 // The detail's code loads with the first drawer opened.
 const AlertDrawer = lazy(() =>
   import('../../audit/AlertDrawer').then((module) => ({ default: module.AlertDrawer })),
 );
 
-// The detection rules' alerts, most recent activity first, filtered in the
-// URL: at a glance who each is about and how serious it is; why it fired,
-// what its events show and its history in a drawer when asked for.
+// The alert center: the detection rules' alerts, most recent activity first
+// (or as sorted), filtered and searched in the URL, kept current while shown
+// (the live stream: a quiet reload shortly after a change). At a glance who
+// each is about, how serious it is, whether someone took it on, whether it
+// was escalated or is silenced; why it fired, what its events show and its
+// history in a drawer when asked for.
 export function AlertsPage() {
   const [params, setParams] = useSearchParams();
   const filters = Object.fromEntries(
@@ -35,9 +68,9 @@ export function AlertsPage() {
       const value = params.get(name);
       return value === null || value === '' ? [] : [[name, value]];
     }),
-  ) as Partial<Record<(typeof NAMES)[number], string>>;
+  ) as Filters;
   const offset = Math.max(0, Number.parseInt(params.get('offset') ?? '0', 10) || 0);
-  const { state, retry } = useLoader(
+  const { state, retry, refresh } = useLoader(
     () =>
       call(
         api.GET('/api/alerts', {
@@ -47,9 +80,10 @@ export function AlertsPage() {
       ),
     params.toString(),
   );
+  useLiveRefresh(refresh);
   const [open, setOpen] = useState<string | null>(null);
   const base = useId();
-  const go = (next: typeof filters, nextOffset = 0) => {
+  const go = (next: Filters, nextOffset = 0) => {
     const search = new URLSearchParams();
     for (const name of NAMES) {
       const value = next[name];
@@ -101,7 +135,17 @@ export function AlertsPage() {
                           </td>
                           <td>{alert.appSlug}</td>
                           <td>
-                            <Badge kind="status" value={alert.status} />
+                            <span className="actions">
+                              <Badge kind="status" value={alert.status} />
+                              {alert.escalations > 0 && alert.acknowledgedAt === null && (
+                                <span className="badge sev-high">
+                                  Escalated × {alert.escalations}
+                                </span>
+                              )}
+                              {silenced(alert.mutedUntil) && (
+                                <span className="badge">Silenced</span>
+                              )}
+                            </span>
                           </td>
                           <td>
                             <PersonName
@@ -172,8 +216,8 @@ function AlertFilters({
   filters,
   onSearch,
 }: {
-  filters: Partial<Record<(typeof NAMES)[number], string>>;
-  onSearch: (filters: Partial<Record<(typeof NAMES)[number], string>>) => void;
+  filters: Filters;
+  onSearch: (filters: Filters) => void;
 }) {
   const apps = useVisibleApps();
   const [draft, setDraft] = useState(filters);
@@ -189,6 +233,14 @@ function AlertFilters({
         onSearch(draft);
       }}
     >
+      <TextField
+        label="Search"
+        name="q"
+        maxLength={100}
+        value={draft.q ?? ''}
+        onChange={set('q')}
+        error={null}
+      />
       {apps.state.kind === 'loaded' && (
         <AppPicker
           apps={apps.state.data.items.filter((app) => !app.system)}
@@ -201,7 +253,7 @@ function AlertFilters({
         label="Status"
         value={draft.status ?? ''}
         onChange={set('status')}
-        options={asOptions(STATUSES)}
+        options={[['open,in_review', 'Unresolved'], ...asOptions(STATUSES)]}
         anyLabel="Any"
       />
       <SelectField
@@ -217,6 +269,49 @@ function AlertFilters({
         value={draft.rule ?? ''}
         onChange={set('rule')}
         error={null}
+      />
+      <DateTimeField
+        label="Last seen from"
+        value={toLocalInput(draft.from ?? null)}
+        onChange={(value) => {
+          set('from')(fromLocalInput(value) ?? '');
+        }}
+      />
+      <DateTimeField
+        label="Last seen to"
+        value={toLocalInput(draft.to ?? null)}
+        onChange={(value) => {
+          set('to')(fromLocalInput(value) ?? '');
+        }}
+      />
+      <SelectField
+        label="Silenced"
+        value={draft.muted ?? ''}
+        onChange={set('muted')}
+        options={[
+          ['true', 'Silenced only'],
+          ['false', 'Not silenced'],
+        ]}
+        anyLabel="Either"
+      />
+      <SelectField
+        label="Sort by"
+        value={draft.sort ?? 'last_seen'}
+        onChange={(value) => {
+          set('sort')(value === 'last_seen' ? '' : value);
+        }}
+        options={SORTS}
+      />
+      <SelectField
+        label="Order"
+        value={draft.order ?? 'desc'}
+        onChange={(value) => {
+          set('order')(value === 'desc' ? '' : value);
+        }}
+        options={[
+          ['desc', 'Newest or most serious first'],
+          ['asc', 'Oldest or least serious first'],
+        ]}
       />
       <div className="actions">
         <button type="submit">Filter</button>

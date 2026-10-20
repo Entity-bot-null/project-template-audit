@@ -791,8 +791,9 @@ pide al soporte de DigitalOcean que lo desbloquee.
 
 **Canales de alertas** (opcional): en `api.env`,
 `AUDIT_SLACK_WEBHOOK_URL=<el webhook entrante de Slack>` o
-`AUDIT_TEAMS_WEBHOOK_URL=<la URL del flujo de Teams>`: las alertas nuevas desde severidad medium
-([manual](manual.es.md#116-audit-hub-avisos-de-alertas-y-geolocalización-por-ip)).
+`AUDIT_TEAMS_WEBHOOK_URL=<la URL del flujo de Teams>`: las alertas nuevas desde severidad medium,
+y otra vez las que nadie reconoce, como dice el escalamiento de cada severidad (se define en
+**Detection rules**) ([manual](manual.es.md#116-audit-hub-avisos-de-alertas-y-geolocalización-por-ip)).
 **Geolocalización por IP** (opcional): los ficheros y las variables `GEOIP_*` de
 [deploy-vps.md](deploy-vps.md#ip-geolocation), en `/srv/app/geoip` y `api.env`.
 
@@ -921,7 +922,9 @@ para un inicio de sesión sin el teléfono. A partir de ahí cada inicio de sesi
 y un código.
 
 **Comprueba:** después del segundo factor se abre el Overview (vacío hasta que se conecta una
-aplicación, fase 9), y el menú muestra Applications, Retention, Integrity, Users e Invitations.
+aplicación, fase 9), el menú muestra Applications, Retention, Integrity, Users e Invitations, y la
+cabecera dice **Live** en pocos segundos (las alertas en vivo del panel llegan a través de Caddy;
+otro proxy delante no debe retenerlas: [deploy-vps.md](deploy-vps.md#how-it-works)).
 
 **Las demás personas** llegan por invitación, desde las páginas de administración (con el correo
 encendido, 7.6):
@@ -1021,7 +1024,11 @@ su servidor) y vuelve a desplegar el proyecto.
 - inicia sesión en el proyecto (una contraseña equivocada también cuenta): **Events** muestra el
   evento;
 - con una URL de webhook: la página de la aplicación → **Webhooks** → **Send a test**, y la entrega
-  de debajo muestra `delivered`.
+  de debajo muestra `delivered`;
+- la **SOC view** muestra la fuente de la aplicación como **Active**. Detén el proyecto: pasado su
+  plazo de heartbeat la fuente pasa a **Disconnected** y se abre una alerta `source_silent` (con un
+  aviso y, si ya hiciste clic en la página, su sonido); vuelve a arrancarlo y la alerta se resuelve
+  sola.
 
 **Si falla:** si no hay heartbeat después de unos minutos, el proyecto no llega a Audit Hub o lo
 rechaza: con las métricas del proyecto encendidas (OpenTelemetry), la métrica del conector

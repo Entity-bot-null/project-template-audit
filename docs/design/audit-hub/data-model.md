@@ -743,17 +743,30 @@ model Alert {
   version      Int           @default(0)
   createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  // Who first took it on (Acknowledge, or the move to in_review): its
+  // escalation stops there (real-time alerting, ADR 0016).
+  acknowledgedAt   DateTime? @map("acknowledged_at") @db.Timestamptz(3)
+  acknowledgedById String?   @map("acknowledged_by_id") @db.Uuid
+  // Escalation while nobody acknowledges it: how many times so far, when
+  // last, and the time it counts from (its creation, or its reopening).
+  escalations      Int       @default(0)
+  escalationBaseAt DateTime  @default(now()) @map("escalation_base_at") @db.Timestamptz(3)
+  lastEscalatedAt  DateTime? @map("last_escalated_at") @db.Timestamptz(3)
 
   activities AlertActivity[]
   events     AlertEvent[]
 
   @@index([appId, status, lastSeenAt(sort: Desc)])
   @@index([assigneeId])
+  // The live stream's changes, in order.
+  @@index([updatedAt, id])
+  // A rule's new alerts in an application in the last hour (the flood cap).
+  @@index([appId, rule, createdAt])
   @@map("alerts")
 }
 
 // History of an alert: created, occurrence, status, assignment, note,
-// notified. Append-only.
+// notified, action requested, acknowledged, escalated. Append-only.
 model AlertActivity {
   id         String   @id @default(uuid(7)) @db.Uuid
   alertId    String   @map("alert_id") @db.Uuid
@@ -781,6 +794,65 @@ model AlertEvent {
   @@id([alertId, eventPk])
   @@index([eventPk])
   @@map("alert_events")
+}
+
+// A silence of an application's alerts, of one rule or of all (rule null),
+// for at most a week: raised, kept and shown as always; email, chat,
+// escalation and the panel's sounds and notices stay quiet. Kept when lifted.
+model AlertMute {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  appId       String    @map("app_id") @db.Uuid
+  rule        String?
+  reason      String
+  until       DateTime  @db.Timestamptz(3)
+  createdById String    @map("created_by_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  endedAt     DateTime? @map("ended_at") @db.Timestamptz(3)
+  endedById   String?   @map("ended_by_id") @db.Uuid
+
+  @@index([appId, until])
+  @@map("alert_mutes")
+}
+
+// An administrator's settings of a detection rule (alerts/rule-catalog.ts):
+// on or off, a severity in place of its own, its parameters within the
+// catalog's bounds. A rule without a row runs with its defaults.
+model DetectionRuleSetting {
+  rule        String         @id
+  enabled     Boolean        @default(true)
+  severity    AuditSeverity?
+  params      Json           @default("{}")
+  updatedById String?        @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("detection_rule_settings")
+}
+
+// Escalation of the alerts nobody acknowledged, per severity. One row per
+// severity, written by the migration (critical and high on by default).
+model EscalationPolicy {
+  severity           AuditSeverity @id
+  enabled            Boolean
+  firstAfterMinutes  Int           @map("first_after_minutes")
+  repeatEveryMinutes Int           @map("repeat_every_minutes")
+  maxEscalations     Int           @map("max_escalations")
+  channels           String[]      // email, chat
+  updatedById        String?       @map("updated_by_id") @db.Uuid
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("escalation_policies")
+}
+
+// A person's notification preferences in the panel (sounds, browser
+// notices, quiet time, muted applications), one validated document.
+model NotificationPreference {
+  userId      String   @id @map("user_id") @db.Uuid
+  preferences Json
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
 }
 
 enum WebhookTarget {
@@ -1037,6 +1109,18 @@ CREATE INDEX "audit_events_request_idx"  ON "audit_events" ("app_id", "request_i
 CREATE INDEX "audit_events_failures_idx" ON "audit_events" ("app_id", "recorded_at" DESC) WHERE "outcome" <> 'success';
 -- One open alert per group key.
 CREATE UNIQUE INDEX "alerts_open_group_key" ON "alerts" ("group_key") WHERE "status" IN ('open', 'in_review');
+
+-- Real-time alerting (migration 20261020100000_add_realtime_alerting, ADR 0016).
+ALTER TABLE "alerts" ADD CONSTRAINT "alerts_acknowledgement_check"
+  CHECK (("acknowledged_at" IS NULL) = ("acknowledged_by_id" IS NULL) AND "escalations" >= 0);
+-- The escalation job's candidates: open alerts nobody acknowledged.
+CREATE INDEX "alerts_unacknowledged_open_idx" ON "alerts" ("severity", "escalation_base_at")
+  WHERE "status" = 'open' AND "acknowledged_at" IS NULL;
+-- alert_activities_kind_check gains 'acknowledged' and 'escalated'; alert_mutes,
+-- detection_rule_settings, escalation_policies and notification_preferences get
+-- CHECKs of their bounds (a silence ends after it starts, with a reason of 10
+-- to 500 characters; the policies' minutes and times; rule ids; documents of 4
+-- and 8 KiB at most).
 
 -- ── Retention (F3) ──────────────────────────────────────────────────────────
 CREATE FUNCTION audit_retention_min_days(c "RetentionClass") RETURNS integer

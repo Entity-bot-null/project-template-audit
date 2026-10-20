@@ -10,11 +10,11 @@ import { PrismaService } from '../prisma/prisma.service.js';
 
 const SEVERITIES = ['info', 'low', 'medium', 'high', 'critical'] as const;
 
-/** A set of severities: each once. */
+/** A set of severities: each once (a refinement, not a transform: the contract keeps its type). */
 const Severities = z
   .array(z.enum(SEVERITIES))
   .max(SEVERITIES.length)
-  .transform((values) => [...new Set(values)]);
+  .refine((values) => new Set(values).size === values.length, 'each severity once');
 
 /**
  * How the panel tells a person about alerts, in their browser: sounds and

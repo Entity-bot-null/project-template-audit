@@ -3422,7 +3422,20 @@
                               "minimum": 0,
                               "maximum": 100
                             },
-                            "severities": {}
+                            "severities": {
+                              "maxItems": 5,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "low",
+                                  "medium",
+                                  "high",
+                                  "critical"
+                                ]
+                              }
+                            }
                           },
                           "required": [
                             "enabled",
@@ -3437,7 +3450,20 @@
                             "enabled": {
                               "type": "boolean"
                             },
-                            "severities": {}
+                            "severities": {
+                              "maxItems": 5,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "low",
+                                  "medium",
+                                  "high",
+                                  "critical"
+                                ]
+                              }
+                            }
                           },
                           "required": [
                             "enabled",
@@ -3673,7 +3699,20 @@
                               "minimum": 0,
                               "maximum": 100
                             },
-                            "severities": {}
+                            "severities": {
+                              "maxItems": 5,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "low",
+                                  "medium",
+                                  "high",
+                                  "critical"
+                                ]
+                              }
+                            }
                           },
                           "required": [
                             "enabled",
@@ -3688,7 +3727,20 @@
                             "enabled": {
                               "type": "boolean"
                             },
-                            "severities": {}
+                            "severities": {
+                              "maxItems": 5,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "low",
+                                  "medium",
+                                  "high",
+                                  "critical"
+                                ]
+                              }
+                            }
                           },
                           "required": [
                             "enabled",
@@ -9184,6 +9236,15 @@
                               "escalations": {
                                 "type": "integer"
                               },
+                              "lastEscalatedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "createdAt": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
                               "mutedUntil": {
                                 "nullable": true,
                                 "type": "string",
@@ -9216,6 +9277,8 @@
                               "acknowledgedAt",
                               "acknowledgedById",
                               "escalations",
+                              "lastEscalatedAt",
+                              "createdAt",
                               "mutedUntil",
                               "updatedAt",
                               "version"
@@ -9405,6 +9468,15 @@
                         },
                         "escalations": {
                           "type": "integer"
+                        },
+                        "lastEscalatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
                         },
                         "mutedUntil": {
                           "nullable": true,
@@ -9794,6 +9866,8 @@
                         "acknowledgedAt",
                         "acknowledgedById",
                         "escalations",
+                        "lastEscalatedAt",
+                        "createdAt",
                         "mutedUntil",
                         "updatedAt",
                         "version",
@@ -10027,6 +10101,15 @@
                         "escalations": {
                           "type": "integer"
                         },
+                        "lastEscalatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
                         "mutedUntil": {
                           "nullable": true,
                           "type": "string",
@@ -10415,6 +10498,8 @@
                         "acknowledgedAt",
                         "acknowledgedById",
                         "escalations",
+                        "lastEscalatedAt",
+                        "createdAt",
                         "mutedUntil",
                         "updatedAt",
                         "version",
@@ -10641,6 +10726,15 @@
                         "escalations": {
                           "type": "integer"
                         },
+                        "lastEscalatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
                         "mutedUntil": {
                           "nullable": true,
                           "type": "string",
@@ -11029,6 +11123,8 @@
                         "acknowledgedAt",
                         "acknowledgedById",
                         "escalations",
+                        "lastEscalatedAt",
+                        "createdAt",
                         "mutedUntil",
                         "updatedAt",
                         "version",
@@ -11255,6 +11351,15 @@
                         "escalations": {
                           "type": "integer"
                         },
+                        "lastEscalatedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
                         "mutedUntil": {
                           "nullable": true,
                           "type": "string",
@@ -11643,6 +11748,8 @@
                         "acknowledgedAt",
                         "acknowledgedById",
                         "escalations",
+                        "lastEscalatedAt",
+                        "createdAt",
                         "mutedUntil",
                         "updatedAt",
                         "version",
@@ -18241,6 +18348,7 @@
                       "/revert-email-change",
                       "/accept-invitation",
                       "/account",
+                      "/account/notifications",
                       "/admin/users",
                       "/admin/invitations",
                       "/events",
@@ -18250,6 +18358,8 @@
                       "/security",
                       "/alerts",
                       "/alerts/:alertId",
+                      "/soc",
+                      "/detection-rules",
                       "/exports",
                       "/apps",
                       "/apps/new",

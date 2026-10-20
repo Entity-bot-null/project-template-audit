@@ -1190,7 +1190,12 @@ async function reviewHistory(
     const resolved = await call(api, `/api/alerts/${alert.id}`, {
       method: 'PATCH',
       headers: bearer,
-      body: { status: 'resolved', version: alert.version },
+      // Closing one says why (kept in its history).
+      body: {
+        status: 'resolved',
+        reason: 'Expected activity: the person confirmed it was them.',
+        version: alert.version,
+      },
     });
     const noted = await call(api, `/api/alerts/${alert.id}/notes`, {
       method: 'POST',

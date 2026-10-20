@@ -24,11 +24,19 @@ const APP_ID = SHOP;
 const GET = `GET /api/alerts/${ALERT_ID}`;
 const PATCH = `PATCH /api/alerts/${ALERT_ID}`;
 const NOTE = `POST /api/alerts/${ALERT_ID}/notes`;
+const ACK = `POST /api/alerts/${ALERT_ID}/acknowledge`;
+const MUTES = 'GET /api/alert-mutes';
+const MUTE = 'POST /api/alert-mutes';
+const MUTE_ID = '0190b6a1-0000-7000-8000-0000000000c1';
+const LIFT = `POST /api/alert-mutes/${MUTE_ID}/end`;
 const REQUEST = 'POST /api/response-actions';
 const STEP_UP = 'POST /api/account/step-up';
 const routeOf = (request: Request) => `${request.method} ${new URL(request.url).pathname}`;
 const callsTo = (calls: Request[], route: string) =>
   calls.filter((call) => routeOf(call) === route);
+/** The page's requests; a reviewer's page also lists the application's silences (none, unless said). */
+const stub = (handlers: Parameters<typeof stubFetch>[0]) =>
+  stubFetch({ [MUTES]: () => ok({ items: [] }), ...handlers });
 const reauthenticate = () =>
   failure(403, 'Reauthentication required', { 'Audit-Error': 'reauthentication_required' });
 
@@ -66,7 +74,7 @@ const detail = (overrides: Partial<AlertDetail> = {}): AlertDetail =>
         userLabel: admin.name,
         fromStatus: 'open',
         toStatus: 'false_positive',
-        note: null,
+        note: 'A load test of ours',
         assigneeLabel: null,
         createdAt: '2026-10-14T09:00:00.000Z',
       },
@@ -111,6 +119,12 @@ function answers(...versions: AlertDetail[]) {
   return () => ok(versions[Math.min(index++, versions.length - 1)]);
 }
 
+/** The silences answered in turn: the first load, then each reload. */
+function silences(...lists: unknown[][]) {
+  let index = 0;
+  return () => ok({ items: lists[Math.min(index++, lists.length - 1)] });
+}
+
 async function confirmItIsYou(user: ReturnType<typeof userEvent.setup>) {
   const dialog = await screen.findByRole('dialog', { name: 'Confirm it is you' });
   await user.type(within(dialog).getByLabelText('Password'), 'admin-password');
@@ -128,7 +142,7 @@ afterEach(() => {
 
 describe('AlertDetailPage', () => {
   it('says an id that is not an alert id is not found, without asking', async () => {
-    const { fetchMock } = stubFetch({});
+    const { fetchMock } = stub({});
     renderRoute('/alerts/not-an-id');
     expect(await screen.findByRole('alert')).toHaveTextContent('Not found.');
     expect(fetchMock).not.toHaveBeenCalled();
@@ -136,7 +150,7 @@ describe('AlertDetailPage', () => {
 
   it('explains a failure and retries on demand', async () => {
     let attempt = 0;
-    stubFetch({
+    stub({
       [GET]: () => (attempt++ === 0 ? failure(503, 'Unavailable') : ok(detail())),
     });
     renderRoute(`/alerts/${ALERT_ID}`);
@@ -149,7 +163,7 @@ describe('AlertDetailPage', () => {
 
   it('shows a viewer why it fired, what its events show, the events and its history, nothing to change', async () => {
     signedInAs(viewer);
-    stubFetch({ [GET]: () => ok(detail()) });
+    stub({ [GET]: () => ok(detail()) });
     renderRoute(`/alerts/${ALERT_ID}`);
 
     expect(
@@ -203,7 +217,8 @@ describe('AlertDetailPage', () => {
     );
     expect(history.map((item) => item.textContent)).toEqual([
       `${formatDateTime('2026-10-14T08:00:00.000Z')} · opened`,
-      `${formatDateTime('2026-10-14T09:00:00.000Z')} · status changed by Admin: open → false positive`,
+      // With why it was closed.
+      `${formatDateTime('2026-10-14T09:00:00.000Z')} · status changed by Admin: open → false positive, A load test of ours`,
       `${formatDateTime('2026-10-14T10:00:00.000Z')} · note by Admin: Looking into it`,
     ]);
 
@@ -221,7 +236,7 @@ describe('AlertDetailPage', () => {
       toStatus: null,
       createdAt: '2026-10-15T09:00:00.000Z',
     };
-    stubFetch({
+    stub({
       [GET]: () =>
         ok(
           detail({
@@ -269,7 +284,7 @@ describe('AlertDetailPage', () => {
   });
 
   it('says so when this version does not describe a rule, and when no event was kept', async () => {
-    stubFetch({
+    stub({
       [GET]: () =>
         ok(
           detail({
@@ -308,7 +323,7 @@ describe('AlertDetailPage', () => {
   });
 
   it('keeps the facts it has when some are missing', async () => {
-    stubFetch({
+    stub({
       [GET]: () =>
         ok(
           detail({
@@ -338,7 +353,7 @@ describe('AlertDetailPage', () => {
   });
 
   it('shows a subject that is not an id as text, and who it is assigned to', async () => {
-    stubFetch({
+    stub({
       [GET]: () =>
         ok(
           detail({
@@ -359,7 +374,7 @@ describe('AlertDetailPage', () => {
   });
 
   it('offers no response action for an alert about no one', async () => {
-    stubFetch({ [GET]: () => ok(detail({ subject: null, subjectLabel: null })) });
+    stub({ [GET]: () => ok(detail({ subject: null, subjectLabel: null })) });
     renderRoute(`/alerts/${ALERT_ID}`);
 
     await screen.findByRole('heading', { name: 'Review' });
@@ -370,7 +385,7 @@ describe('AlertDetailPage', () => {
 
   it('lets an auditor review, never ask for a response action', async () => {
     signedInAs(auditor);
-    stubFetch({ [GET]: () => ok(detail()) });
+    stub({ [GET]: () => ok(detail()) });
     renderRoute(`/alerts/${ALERT_ID}`);
 
     expect(await screen.findByRole('heading', { name: 'Review' })).toBeInTheDocument();
@@ -380,7 +395,7 @@ describe('AlertDetailPage', () => {
 
 describe('reviewing an alert', () => {
   it('changes the status with the version it read, then shows it again', async () => {
-    const { calls } = stubFetch({
+    const { calls } = stub({
       [GET]: answers(detail(), detail({ status: 'resolved', version: 4 })),
       [PATCH]: () => ok(detail({ status: 'resolved', version: 4 })),
     });
@@ -392,6 +407,7 @@ describe('reviewing an alert', () => {
     expect(save).toBeDisabled();
     await user.selectOptions(screen.getByLabelText('Status'), 'resolved');
     expect(save).toBeEnabled();
+    await user.type(screen.getByLabelText('How it was resolved'), '  Password reset by the owner ');
     await user.click(save);
 
     await vi.waitFor(() => {
@@ -399,6 +415,7 @@ describe('reviewing an alert', () => {
     });
     await expect(callsTo(calls, PATCH)[0]?.json()).resolves.toEqual({
       status: 'resolved',
+      reason: 'Password reset by the owner',
       version: 3,
     });
     expect(await screen.findByLabelText('Status')).toHaveValue('resolved');
@@ -406,7 +423,7 @@ describe('reviewing an alert', () => {
   });
 
   it('sends nothing when the status did not change', async () => {
-    const { calls } = stubFetch({ [GET]: () => ok(detail()) });
+    const { calls } = stub({ [GET]: () => ok(detail()) });
     renderRoute(`/alerts/${ALERT_ID}`);
 
     const save = await screen.findByRole('button', { name: 'Save status' });
@@ -415,7 +432,7 @@ describe('reviewing an alert', () => {
   });
 
   it('reloads the alert when someone changed it meanwhile', async () => {
-    const { calls } = stubFetch({
+    const { calls } = stub({
       [GET]: answers(detail(), detail({ status: 'in_review', version: 4 })),
       [PATCH]: () => failure(409, 'The alert changed meanwhile'),
     });
@@ -424,6 +441,7 @@ describe('reviewing an alert', () => {
 
     await screen.findByRole('heading', { name: 'Review' });
     await user.selectOptions(screen.getByLabelText('Status'), 'resolved');
+    await user.type(screen.getByLabelText('How it was resolved'), 'Password reset by the owner');
     await user.click(screen.getByRole('button', { name: 'Save status' }));
 
     await vi.waitFor(() => {
@@ -438,7 +456,7 @@ describe('reviewing an alert', () => {
   });
 
   it('explains any other failure and keeps the choice', async () => {
-    const { calls } = stubFetch({
+    const { calls } = stub({
       [GET]: () => ok(detail()),
       [PATCH]: () => failure(503, 'Unavailable'),
     });
@@ -447,6 +465,7 @@ describe('reviewing an alert', () => {
 
     await screen.findByRole('heading', { name: 'Review' });
     await user.selectOptions(screen.getByLabelText('Status'), 'false_positive');
+    await user.type(screen.getByLabelText('Why it is a false positive'), 'A load test of ours');
     await user.click(screen.getByRole('button', { name: 'Save status' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('The service is unavailable');
@@ -454,8 +473,80 @@ describe('reviewing an alert', () => {
     expect(callsTo(calls, GET)).toHaveLength(1);
   });
 
+  it('asks why before closing it, and sends nothing until said', async () => {
+    const { calls } = stub({ [GET]: () => ok(detail()) });
+    renderRoute(`/alerts/${ALERT_ID}`);
+    const user = userEvent.setup();
+
+    await screen.findByRole('heading', { name: 'Review' });
+    await user.selectOptions(screen.getByLabelText('Status'), 'false_positive');
+    await user.type(screen.getByLabelText('Why it is a false positive'), ' too short ');
+    await user.click(screen.getByRole('button', { name: 'Save status' }));
+
+    expect(
+      screen.getByText('Say why, in 10 characters or more: it is kept in its history.'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Why it is a false positive')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(callsTo(calls, PATCH)).toHaveLength(0);
+  });
+
+  it('acknowledges an open alert with the version it read: its escalation stops', async () => {
+    const { calls } = stub({
+      [GET]: answers(
+        detail({ escalations: 2, lastEscalatedAt: '2026-10-15T09:45:00.000Z' }),
+        detail({
+          status: 'in_review',
+          acknowledgedAt: '2026-10-15T10:00:00.000Z',
+          acknowledgedById: admin.id,
+          acknowledgedByLabel: 'Admin',
+          escalations: 2,
+          version: 4,
+        }),
+      ),
+      [ACK]: () => ok(detail({ status: 'in_review', version: 4 })),
+    });
+    renderRoute(`/alerts/${ALERT_ID}`);
+    const user = userEvent.setup();
+
+    expect(await screen.findByText(/Nobody has taken it on yet: escalated 2 times/)).toBeVisible();
+    expect(
+      screen.getByText(`2 times, last ${formatDateTime('2026-10-15T09:45:00.000Z')}`),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Acknowledge' }));
+
+    expect(
+      await screen.findByText(`${formatDateTime('2026-10-15T10:00:00.000Z')} by Admin`),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Acknowledge' })).toBeNull();
+    await expect(callsTo(calls, ACK)[0]?.json()).resolves.toEqual({ version: 3 });
+  });
+
+  it('reopens a closed alert', async () => {
+    const { calls } = stub({
+      [GET]: answers(
+        detail({ status: 'resolved', resolvedAt: '2026-10-15T10:00:00.000Z' }),
+        detail({ version: 4 }),
+      ),
+      [PATCH]: () => ok(detail({ version: 4 })),
+    });
+    renderRoute(`/alerts/${ALERT_ID}`);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Reopen' }));
+
+    expect(await screen.findByRole('button', { name: 'Acknowledge' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reopen' })).toBeNull();
+    await expect(callsTo(calls, PATCH)[0]?.json()).resolves.toEqual({
+      status: 'open',
+      version: 3,
+    });
+  });
+
   it('assigns the alert to the reviewer, who can then unassign it', async () => {
-    const { calls } = stubFetch({
+    const { calls } = stub({
       [GET]: answers(
         detail(),
         detail({ assigneeId: admin.id, version: 4 }),
@@ -480,7 +571,7 @@ describe('reviewing an alert', () => {
   });
 
   it('adds a trimmed note, then shows the alert again', async () => {
-    const { calls } = stubFetch({
+    const { calls } = stub({
       [GET]: () => ok(detail()),
       [NOTE]: () => json(201, { data: detail(), message: 'Created' }),
     });
@@ -504,7 +595,7 @@ describe('reviewing an alert', () => {
   });
 
   it('sends no empty note', async () => {
-    const { calls } = stubFetch({ [GET]: () => ok(detail()) });
+    const { calls } = stub({ [GET]: () => ok(detail()) });
     renderRoute(`/alerts/${ALERT_ID}`);
 
     const add = await screen.findByRole('button', { name: 'Add note' });
@@ -513,7 +604,7 @@ describe('reviewing an alert', () => {
   });
 
   it('explains a note that could not be added and keeps it', async () => {
-    stubFetch({
+    stub({
       [GET]: () => ok(detail()),
       [NOTE]: () => failure(429, 'Too many requests', { 'Retry-After': '30' }),
     });
@@ -530,11 +621,76 @@ describe('reviewing an alert', () => {
   });
 });
 
+describe('silencing', () => {
+  const region = () => screen.findByRole('region', { name: 'Silences' });
+  const mute = {
+    id: MUTE_ID,
+    appId: APP_ID,
+    appSlug: 'shop',
+    rule: 'brute_force',
+    reason: 'Load test of the sign-in',
+    until: '2026-10-15T12:00:00.000Z',
+    createdById: admin.id,
+    createdAt: '2026-10-15T10:00:00.000Z',
+    endedAt: null,
+    endedById: null,
+    active: true,
+  };
+
+  it("silences the alert's rule in its application for a while, with a reason", async () => {
+    const { calls } = stub({
+      [GET]: answers(detail(), detail({ mutedUntil: mute.until, version: 4 })),
+      [MUTES]: silences([], [mute]),
+      [MUTE]: () => json(201, { data: mute, message: 'Created' }),
+    });
+    renderRoute(`/alerts/${ALERT_ID}`);
+    const user = userEvent.setup();
+
+    const scope = within(await region());
+    expect(await scope.findByText('None in force for shop.')).toBeInTheDocument();
+    await user.click(scope.getByRole('button', { name: 'Silence' }));
+    expect(scope.getByLabelText('Why silence it')).toHaveAttribute('aria-invalid', 'true');
+    expect(callsTo(calls, MUTE)).toHaveLength(0);
+
+    await user.selectOptions(scope.getByLabelText('For'), '4 hours');
+    await user.type(scope.getByLabelText('Why silence it'), ' Load test of the sign-in ');
+    await user.click(scope.getByRole('button', { name: 'Silence' }));
+
+    expect(await scope.findByRole('button', { name: 'Lift' })).toBeInTheDocument();
+    expect(scope.getByText('Load test of the sign-in')).toBeInTheDocument();
+    await expect(callsTo(calls, MUTE)[0]?.json()).resolves.toEqual({
+      appId: APP_ID,
+      rule: 'brute_force',
+      minutes: 240,
+      reason: 'Load test of the sign-in',
+    });
+    expect(new URL(callsTo(calls, MUTES)[0]?.url ?? '').searchParams.get('appId')).toBe(APP_ID);
+    expect(await screen.findByText(formatDateTime(mute.until))).toBeInTheDocument();
+  });
+
+  it('lifts a silence in force', async () => {
+    const { calls } = stub({
+      [GET]: () => ok(detail({ mutedUntil: mute.until })),
+      [MUTES]: silences([mute], []),
+      [LIFT]: () => ok({ ...mute, active: false, endedAt: '2026-10-15T10:30:00.000Z' }),
+    });
+    renderRoute(`/alerts/${ALERT_ID}`);
+    const user = userEvent.setup();
+
+    const scope = within(await region());
+    await user.click(await scope.findByRole('button', { name: 'Lift' }));
+
+    expect(await scope.findByText('None in force for shop.')).toBeInTheDocument();
+    expect(scope.getByRole('status')).toHaveTextContent('Lifted.');
+    expect(callsTo(calls, LIFT)).toHaveLength(1);
+  });
+});
+
 describe('asking the application to act', () => {
   const region = () => screen.findByRole('region', { name: 'Ask the application to act' });
 
   it('asks for a reason of 10 characters or more before sending anything', async () => {
-    const { calls } = stubFetch({ [GET]: () => ok(detail()) });
+    const { calls } = stub({ [GET]: () => ok(detail()) });
     renderRoute(`/alerts/${ALERT_ID}`);
     const user = userEvent.setup();
 
@@ -553,7 +709,7 @@ describe('asking the application to act', () => {
 
   it('confirms who is asking, then requests it: another administrator approves it', async () => {
     let attempt = 0;
-    const { calls } = stubFetch({
+    const { calls } = stub({
       [GET]: () => ok(detail()),
       [REQUEST]: () =>
         attempt++ === 0
@@ -593,7 +749,7 @@ describe('asking the application to act', () => {
 
   it('says what became of a request that needs no approval', async () => {
     const answer = deferred<Response>();
-    stubFetch({
+    stub({
       [GET]: () => ok(detail()),
       [REQUEST]: () => answer.promise,
     });
@@ -610,7 +766,7 @@ describe('asking the application to act', () => {
   });
 
   it('requests nothing when the step-up is cancelled', async () => {
-    const { calls } = stubFetch({
+    const { calls } = stub({
       [GET]: () => ok(detail()),
       [REQUEST]: reauthenticate,
     });
@@ -631,7 +787,7 @@ describe('asking the application to act', () => {
   });
 
   it('explains a request that failed', async () => {
-    stubFetch({
+    stub({
       [GET]: () => ok(detail()),
       [REQUEST]: () => failure(400, 'action: not accepted by the application'),
     });

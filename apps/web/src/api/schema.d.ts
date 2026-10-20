@@ -3594,11 +3594,11 @@ export interface operations {
                             sound: {
                                 enabled: boolean;
                                 volume: number;
-                                severities: unknown;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
                             };
                             browser: {
                                 enabled: boolean;
-                                severities: unknown;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
                             };
                             criticalRepeat: {
                                 enabled: boolean;
@@ -3675,11 +3675,11 @@ export interface operations {
                             sound: {
                                 enabled: boolean;
                                 volume: number;
-                                severities: unknown;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
                             };
                             browser: {
                                 enabled: boolean;
-                                severities: unknown;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
                             };
                             criticalRepeat: {
                                 enabled: boolean;
@@ -6220,6 +6220,10 @@ export interface operations {
                                 acknowledgedById: string | null;
                                 escalations: number;
                                 /** Format: date-time */
+                                lastEscalatedAt: string | null;
+                                /** Format: date-time */
+                                createdAt: string;
+                                /** Format: date-time */
                                 mutedUntil: string | null;
                                 /** Format: date-time */
                                 updatedAt: string;
@@ -6317,6 +6321,10 @@ export interface operations {
                             /** Format: uuid */
                             acknowledgedById: string | null;
                             escalations: number;
+                            /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
                             /** Format: date-time */
                             mutedUntil: string | null;
                             /** Format: date-time */
@@ -6519,6 +6527,10 @@ export interface operations {
                             /** Format: uuid */
                             acknowledgedById: string | null;
                             escalations: number;
+                            /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
                             /** Format: date-time */
                             mutedUntil: string | null;
                             /** Format: date-time */
@@ -6730,6 +6742,10 @@ export interface operations {
                             acknowledgedById: string | null;
                             escalations: number;
                             /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
+                            /** Format: date-time */
                             mutedUntil: string | null;
                             /** Format: date-time */
                             updatedAt: string;
@@ -6939,6 +6955,10 @@ export interface operations {
                             /** Format: uuid */
                             acknowledgedById: string | null;
                             escalations: number;
+                            /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
                             /** Format: date-time */
                             mutedUntil: string | null;
                             /** Format: date-time */
@@ -9831,7 +9851,7 @@ export interface operations {
             content: {
                 "application/json": {
                     /** @enum {string} */
-                    route: "/" | "/sign-in" | "/forgot-password" | "/reset-password" | "/sign-up" | "/confirm-sign-up" | "/confirm-email-change" | "/revert-email-change" | "/accept-invitation" | "/account" | "/admin/users" | "/admin/invitations" | "/events" | "/events/:eventId" | "/apps/:appId/actors/:actorId" | "/apps/:appId/resources/:resourceType/:resourceId" | "/security" | "/alerts" | "/alerts/:alertId" | "/exports" | "/apps" | "/apps/new" | "/apps/:appId" | "/response-actions" | "/retention" | "/integrity" | "/admin/users/:userId" | "/*";
+                    route: "/" | "/sign-in" | "/forgot-password" | "/reset-password" | "/sign-up" | "/confirm-sign-up" | "/confirm-email-change" | "/revert-email-change" | "/accept-invitation" | "/account" | "/account/notifications" | "/admin/users" | "/admin/invitations" | "/events" | "/events/:eventId" | "/apps/:appId/actors/:actorId" | "/apps/:appId/resources/:resourceType/:resourceId" | "/security" | "/alerts" | "/alerts/:alertId" | "/soc" | "/detection-rules" | "/exports" | "/apps" | "/apps/new" | "/apps/:appId" | "/response-actions" | "/retention" | "/integrity" | "/admin/users/:userId" | "/*";
                     metrics: ({
                         /** @enum {string} */
                         name: "FCP" | "INP" | "LCP" | "TTFB";

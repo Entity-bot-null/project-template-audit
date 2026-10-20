@@ -857,6 +857,8 @@ export function toResponse(
     acknowledgedAt: Date | null;
     acknowledgedById: string | null;
     escalations: number;
+    lastEscalatedAt: Date | null;
+    createdAt: Date;
     updatedAt: Date;
     version: number;
   },
@@ -882,6 +884,8 @@ export function toResponse(
     acknowledgedAt: row.acknowledgedAt?.toISOString() ?? null,
     acknowledgedById: row.acknowledgedById,
     escalations: row.escalations,
+    lastEscalatedAt: row.lastEscalatedAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
     mutedUntil: mute?.until.toISOString() ?? null,
     updatedAt: row.updatedAt.toISOString(),
     version: row.version,
