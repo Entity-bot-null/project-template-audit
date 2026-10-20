@@ -29,7 +29,7 @@ const USERS: Record<Role, AuthUser> = {
 };
 const userWith = (role: Role) => USERS[role];
 
-const READING = ['Overview', 'Events', 'Security', 'Alerts'];
+const READING = ['Overview', 'Events', 'Security', 'Alerts', 'SOC view', 'Detection rules'];
 const MENUS: [Role, string[]][] = [
   ['member', ['Home', 'Account']],
   ['viewer', [...READING, 'Account']],
@@ -92,6 +92,8 @@ describe('AppLayout', () => {
       '/events',
       '/security',
       '/alerts',
+      '/soc',
+      '/detection-rules',
       '/response-actions',
       '/exports',
       '/apps',

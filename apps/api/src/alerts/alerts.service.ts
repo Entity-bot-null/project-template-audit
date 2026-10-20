@@ -20,12 +20,17 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { slackMessage, teamsMessage } from '../webhooks/chat-messages.js';
 import { WebhookOutboxService } from '../webhooks/webhook-outbox.service.js';
 import { deviceLabel, explainAlert } from './alert-explanation.js';
-import type {
-  AlertDetailResponse,
-  AlertListQuery,
-  AlertResponse,
-  UpdateAlertDto,
+import { type ActiveMute, AlertMutesService, coveringMute } from './alert-mutes.service.js';
+import {
+  type AlertDetailResponse,
+  type AlertListQuery,
+  type AlertResponse,
+  type AlertSummaryResponse,
+  SEVERITY_VALUES,
+  type UpdateAlertDto,
 } from './dto/alert.schemas.js';
+import { MAX_NEW_ALERTS_PER_HOUR } from './rule-catalog.js';
+import { RuleSettingsService } from './rule-settings.service.js';
 
 /** What a rule found: one alert, or one more occurrence of the open one with its group key. */
 export interface RaiseAlert {
@@ -56,6 +61,8 @@ const RANK: Record<AuditSeverity, number> = { info: 0, low: 1, medium: 2, high: 
 const EMAIL_FROM: AuditSeverity = 'high';
 const CHAT_FROM: AuditSeverity = 'medium';
 const MAX_ALERT_EVENTS = 100;
+/** A condition's alert refreshes its last sighting this often while it holds. */
+const CONDITION_REFRESH_MS = 10 * 60_000;
 const STATS_INTERVAL_MS = 30_000;
 /** The longest list of the evidence (its most frequent values). */
 const TALLY_LIMIT = 10;
@@ -83,13 +90,20 @@ const TRANSITIONS: Record<AlertStatus, readonly AlertStatus[]> = {
 
 type Tx = Prisma.TransactionClient;
 
+/** An alert's row with its application's slug: what an answer is built from. */
+export type AlertRow = Prisma.AlertGetPayload<{ include: { app: { select: { slug: true } } } }>;
+
 // Alerts (docs/design/audit-hub): grouped so a burst never floods anyone (one
 // open alert per group key, partial unique index alerts_open_group_key: a
 // rule firing again adds an occurrence), notified once when created (the
 // application's webhook; email to the administrators and the application's
 // auditors from high; Slack and Teams from medium, when configured), and
-// worked on by people: status, assignee, notes, every change in
-// alert_activities (append-only). Read, an alert says why it fired in words,
+// worked on by people: acknowledgement, status (a reason to close it),
+// assignee, notes, every change in alert_activities (append-only). A rule an
+// administrator turned off raises nothing; past MAX_NEW_ALERTS_PER_HOUR new
+// alerts of one rule in one application, the next ones fold into a single
+// alert; a silence (alert_mutes) keeps an alert from notifying anyone. Read,
+// an alert says why it fired in words,
 // what the events behind it have in common and who is in it by name, all
 // looked up when read: the alert itself keeps ids and counts only.
 @Injectable()
@@ -104,6 +118,8 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
     private readonly webhooks: WebhookOutboxService,
     private readonly mail: MailOutboxService,
     private readonly explorer: ExplorerService,
+    private readonly settings: RuleSettingsService,
+    private readonly mutes: AlertMutesService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -117,8 +133,14 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
     this.timer = undefined;
   }
 
-  /** In the caller's transaction: the alert and its notifications commit with what found it. */
-  async raise(tx: Tx, input: RaiseAlert): Promise<RaisedAlert> {
+  /**
+   * In the caller's transaction: the alert and its notifications commit with
+   * what found it. Null when an administrator turned its rule off.
+   */
+  async raise(tx: Tx, raised: RaiseAlert): Promise<RaisedAlert | null> {
+    const rule = (await this.settings.snapshot()).of(raised.rule);
+    if (!rule.enabled) return null;
+    const input = await this.capped(tx, { ...raised, severity: rule.severity ?? raised.severity });
     const [row] = await tx.$queryRaw<{ id: string; created: boolean }[]>`
       INSERT INTO "alerts" ("id", "app_id", "rule", "severity", "group_key", "subject", "title",
                             "summary", "first_seen_at", "last_seen_at", "updated_at")
@@ -150,12 +172,39 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
     return row;
   }
 
+  /**
+   * A detection for a group with no open alert, when its rule already opened
+   * MAX_NEW_ALERTS_PER_HOUR alerts in its application within the hour, goes
+   * to one alert of that rule instead: a flood never floods anyone.
+   */
+  private async capped(tx: Tx, input: RaiseAlert): Promise<RaiseAlert> {
+    const [open] = await tx.$queryRaw<{ id: string }[]>`
+      SELECT "id" FROM "alerts"
+      WHERE "group_key" = ${input.groupKey} AND "status" IN ('open', 'in_review') LIMIT 1`;
+    if (open !== undefined) return input;
+    const [recent] = await tx.$queryRaw<{ count: number }[]>`
+      SELECT count(*)::int AS "count" FROM "alerts"
+      WHERE "app_id" = ${input.appId}::uuid AND "rule" = ${input.rule}
+        AND "created_at" > now() - interval '1 hour'`;
+    if ((recent?.count ?? 0) < MAX_NEW_ALERTS_PER_HOUR) return input;
+    const { subject: _subject, ...rest } = input;
+    return {
+      ...rest,
+      groupKey: `${input.rule}:${input.appId}:flood`,
+      title: `More than ${String(MAX_NEW_ALERTS_PER_HOUR)} new alerts of rule ${input.rule} within an hour: the next ones count here`,
+      summary: { folded: true, cap: MAX_NEW_ALERTS_PER_HOUR, lastTitle: input.title.slice(0, 200) },
+    };
+  }
+
   private async notify(tx: Tx, alertId: string, input: RaiseAlert): Promise<void> {
     const app = await tx.connectedApp.findUniqueOrThrow({
       where: { id: input.appId },
       select: { slug: true, name: true, system: true },
     });
     const notified: string[] = [];
+    // A silence quiets the people's channels; the application's own webhook
+    // is its integration, not a notification of anyone.
+    const mute = coveringMute(await this.mutes.active([input.appId], tx), input.appId, input.rule);
     if (!app.system && input.eventPks.length > 0) {
       const first = await tx.auditEvent.findFirst({
         where: { id: { in: input.eventPks } },
@@ -182,7 +231,7 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
             );
       if (queued !== undefined) notified.push('webhook');
     }
-    if (RANK[input.severity] >= RANK[CHAT_FROM]) {
+    if (mute === null && RANK[input.severity] >= RANK[CHAT_FROM]) {
       const alert = {
         appSlug: app.slug,
         appName: app.name,
@@ -197,7 +246,7 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
         notified.push(target);
       }
     }
-    if (RANK[input.severity] >= RANK[EMAIL_FROM] && this.mail.enabled) {
+    if (mute === null && RANK[input.severity] >= RANK[EMAIL_FROM] && this.mail.enabled) {
       const recipients = await tx.user.findMany({
         where: {
           disabledAt: null,
@@ -219,6 +268,8 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
       }
       if (recipients.length > 0) notified.push('email');
     }
+    if (mute !== null)
+      notified.push(`silenced until ${mute.until.toISOString()}: no email or chat`);
     if (notified.length > 0) {
       await tx.alertActivity.create({
         data: { alertId, kind: 'notified', note: notified.join(', ') },
@@ -231,18 +282,46 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
     if (query.appId !== undefined && !(await this.access.canSee(user, query.appId))) {
       return { items: [], total: 0 };
     }
-    const where: Prisma.AlertWhereInput = {
+    const scope: Prisma.AlertWhereInput = {
       ...visible,
       ...(query.appId === undefined ? {} : { appId: query.appId }),
+    };
+    const mutes = await this.mutesOf(scope);
+    const muted: Prisma.AlertWhereInput = {
+      OR: mutes.map((mute) => ({
+        appId: mute.appId,
+        ...(mute.rule === null ? {} : { rule: mute.rule }),
+      })),
+    };
+    const where: Prisma.AlertWhereInput = {
+      ...scope,
       ...(query.status === undefined ? {} : { status: { in: query.status } }),
       ...(query.severity === undefined ? {} : { severity: { in: query.severity } }),
       ...(query.rule === undefined ? {} : { rule: query.rule }),
       ...(query.assigneeId === undefined ? {} : { assigneeId: query.assigneeId }),
+      ...(query.from === undefined && query.to === undefined
+        ? {}
+        : {
+            lastSeenAt: {
+              ...(query.from === undefined ? {} : { gte: new Date(query.from) }),
+              ...(query.to === undefined ? {} : { lte: new Date(query.to) }),
+            },
+          }),
+      AND: [
+        ...(query.q === undefined ? [] : [searchOf(query.q)]),
+        ...(query.muted === undefined
+          ? []
+          : query.muted === 'true'
+            ? [mutes.length === 0 ? { id: { in: [] } } : muted]
+            : mutes.length === 0
+              ? []
+              : [{ NOT: muted }]),
+      ],
     };
     const [rows, total] = await Promise.all([
       this.prisma.alert.findMany({
         where,
-        orderBy: [{ lastSeenAt: 'desc' }, { id: 'desc' }],
+        orderBy: orderOf(query),
         take: query.limit,
         skip: query.offset,
         include: { app: { select: { slug: true } } },
@@ -250,7 +329,90 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
       this.prisma.alert.count({ where }),
     ]);
     const labels = await this.subjectLabels(rows);
-    return { items: rows.map((row) => toResponse(row, labels.get(row.id) ?? null)), total };
+    return {
+      items: rows.map((row) =>
+        toResponse(row, labels.get(row.id) ?? null, coveringMute(mutes, row.appId, row.rule)),
+      ),
+      total,
+    };
+  }
+
+  /** Rows as the API answers them, a batch at once: their subjects' names and silences in two queries. */
+  async responses(rows: AlertRow[]): Promise<AlertResponse[]> {
+    if (rows.length === 0) return [];
+    const [labels, mutes] = await Promise.all([
+      this.subjectLabels(rows),
+      this.mutes.active([...new Set(rows.map((row) => row.appId))]),
+    ]);
+    return rows.map((row) =>
+      toResponse(row, labels.get(row.id) ?? null, coveringMute(mutes, row.appId, row.rule)),
+    );
+  }
+
+  /** The silences in force in the applications a query covers. */
+  private async mutesOf(scope: Prisma.AlertWhereInput): Promise<ActiveMute[]> {
+    const appId = scope.appId;
+    if (typeof appId === 'string') return this.mutes.active([appId]);
+    const listed = (appId as { in?: string[] } | undefined)?.in;
+    if (listed !== undefined) return this.mutes.active(listed);
+    const apps = await this.prisma.alertMute.findMany({
+      where: { until: { gt: new Date() }, endedAt: null },
+      select: { appId: true },
+      distinct: ['appId'],
+    });
+    return this.mutes.active(apps.map((app) => app.appId));
+  }
+
+  /** The unresolved alerts of the applications the caller sees, by severity. */
+  async summary(user: RequestUser, appId?: string): Promise<AlertSummaryResponse> {
+    const empty = () =>
+      Object.fromEntries(SEVERITY_VALUES.map((severity) => [severity, 0])) as Record<
+        AuditSeverity,
+        number
+      >;
+    const result: AlertSummaryResponse = {
+      open: empty(),
+      inReview: empty(),
+      muted: 0,
+      oldestOpenAt: null,
+    };
+    if (appId !== undefined && !(await this.access.canSee(user, appId))) return result;
+    const scope: Prisma.AlertWhereInput = {
+      ...(await this.access.appFilter(user)),
+      ...(appId === undefined ? {} : { appId }),
+    };
+    const unresolved: Prisma.AlertWhereInput = { ...scope, status: { in: ['open', 'in_review'] } };
+    const mutes = await this.mutesOf(scope);
+    const [groups, oldest, muted] = await Promise.all([
+      this.prisma.alert.groupBy({
+        by: ['status', 'severity'],
+        where: unresolved,
+        _count: { _all: true },
+      }),
+      this.prisma.alert.findFirst({
+        where: { ...scope, status: 'open' },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true },
+      }),
+      mutes.length === 0
+        ? Promise.resolve(0)
+        : this.prisma.alert.count({
+            where: {
+              ...unresolved,
+              OR: mutes.map((mute) => ({
+                appId: mute.appId,
+                ...(mute.rule === null ? {} : { rule: mute.rule }),
+              })),
+            },
+          }),
+    ]);
+    for (const group of groups) {
+      const bucket = group.status === 'open' ? result.open : result.inReview;
+      bucket[group.severity] = group._count._all;
+    }
+    result.muted = muted;
+    result.oldestOpenAt = oldest?.createdAt.toISOString() ?? null;
+    return result;
   }
 
   async get(user: RequestUser, id: string): Promise<AlertDetailResponse> {
@@ -278,6 +440,7 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
       this.staffNames([
         row.assigneeId,
         row.resolvedById,
+        row.acknowledgedById,
         row.appId === SYSTEM_APP_ID ? row.subject : null,
         ...row.activities.flatMap((activity) => [
           activity.userId,
@@ -288,8 +451,9 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
     const names = namesOf(rows, events, staff);
     const staffName = (userId: string | null) =>
       userId === null ? null : (staff.get(userId) ?? null);
+    const mute = coveringMute(await this.mutes.active([row.appId]), row.appId, row.rule);
     return {
-      ...toResponse(row, row.subject === null ? null : (names.get(row.subject) ?? null)),
+      ...toResponse(row, row.subject === null ? null : (names.get(row.subject) ?? null), mute),
       summary: row.summary as Record<string, unknown>,
       explanation: explainAlert(
         {
@@ -299,10 +463,12 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
           lastSeenAt: row.lastSeenAt,
         },
         names,
+        (await this.settings.snapshot()).of(row.rule).params,
       ),
       evidence: evidenceOf(rows, events),
       assigneeLabel: staffName(row.assigneeId),
       resolvedByLabel: staffName(row.resolvedById),
+      acknowledgedByLabel: staffName(row.acknowledgedById),
       activities: row.activities.map((activity) => ({
         id: activity.id,
         kind: activity.kind,
@@ -389,6 +555,8 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
       }
     }
     const closing = input.status === 'resolved' || input.status === 'false_positive';
+    const changes = input.status !== undefined && input.status !== current.status;
+    const now = new Date();
     try {
       await this.prisma.$transaction(async (tx) => {
         const { count } = await tx.alert.updateMany({
@@ -400,14 +568,28 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
             ...(input.status === undefined
               ? {}
               : closing
-                ? { resolvedAt: new Date(), resolvedById: user.id }
+                ? { resolvedAt: now, resolvedById: user.id }
                 : { resolvedAt: null, resolvedById: null }),
+            // In review: taken on (its escalation stops), by the first who did.
+            ...(input.status === 'in_review' && current.acknowledgedAt === null
+              ? { acknowledgedAt: now, acknowledgedById: user.id }
+              : {}),
+            // Open again: nobody has it; its escalation starts over from now.
+            ...(changes && input.status === 'open'
+              ? {
+                  acknowledgedAt: null,
+                  acknowledgedById: null,
+                  escalations: 0,
+                  escalationBaseAt: now,
+                  lastEscalatedAt: null,
+                }
+              : {}),
           },
         });
         if (count === 0) {
           throw new ConflictException('The alert changed since it was read: reload it');
         }
-        if (input.status !== undefined && input.status !== current.status) {
+        if (changes) {
           await tx.alertActivity.create({
             data: {
               alertId: id,
@@ -415,6 +597,7 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
               userId: user.id,
               fromStatus: current.status,
               toStatus: input.status,
+              ...(input.reason === undefined ? {} : { note: input.reason }),
             },
           });
         }
@@ -442,16 +625,128 @@ export class AlertsService implements OnApplicationBootstrap, OnModuleDestroy {
 
   async addNote(user: RequestUser, id: string, note: string): Promise<AlertDetailResponse> {
     await this.manageable(user, id);
-    await this.prisma.alertActivity.create({
-      data: { alertId: id, kind: 'note', userId: user.id, note },
-    });
+    await this.prisma.$transaction([
+      this.prisma.alertActivity.create({
+        data: { alertId: id, kind: 'note', userId: user.id, note },
+      }),
+      // A change the live stream carries: whoever has it open sees the note.
+      this.prisma.alert.update({ where: { id }, data: { updatedAt: new Date() } }),
+    ]);
     return this.get(user, id);
+  }
+
+  /**
+   * Taking an alert on: In review, the caller its assignee when nobody is,
+   * acknowledged (its escalation stops). Under the version the caller saw.
+   */
+  async acknowledge(user: RequestUser, id: string, version: number): Promise<AlertDetailResponse> {
+    const current = await this.manageable(user, id);
+    if (current.status === 'resolved' || current.status === 'false_positive') {
+      throw new ConflictException('A closed alert is not acknowledged: reopen it first');
+    }
+    if (current.acknowledgedAt !== null && current.status === 'in_review') {
+      throw new ConflictException('Already acknowledged');
+    }
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.alert.updateMany({
+        where: { id, version },
+        data: {
+          version: { increment: 1 },
+          status: 'in_review',
+          acknowledgedAt: current.acknowledgedAt ?? now,
+          acknowledgedById: current.acknowledgedById ?? user.id,
+          ...(current.assigneeId === null ? { assigneeId: user.id } : {}),
+        },
+      });
+      if (count === 0)
+        throw new ConflictException('The alert changed since it was read: reload it');
+      await tx.alertActivity.create({
+        data: {
+          alertId: id,
+          kind: 'acknowledged',
+          userId: user.id,
+          fromStatus: current.status,
+          toStatus: 'in_review',
+        },
+      });
+      if (current.assigneeId === null) {
+        await tx.alertActivity.create({
+          data: { alertId: id, kind: 'assigned', userId: user.id, note: user.id },
+        });
+      }
+    });
+    this.logger.log(`Alert ${id} acknowledged by ${user.id}`);
+    return this.get(user, id);
+  }
+
+  /**
+   * A condition that holds (a source down, a queue backed up): one alert while
+   * it lasts, raised when it starts; while open, its last sighting and summary
+   * kept fresh every CONDITION_REFRESH_MS, never an occurrence a minute.
+   */
+  async condition(tx: Tx, input: RaiseAlert): Promise<RaisedAlert | null> {
+    const open = await tx.alert.findFirst({
+      where: { groupKey: input.groupKey, status: { in: ['open', 'in_review'] } },
+      select: { id: true, lastSeenAt: true },
+    });
+    if (open === null) return this.raise(tx, input);
+    if (input.at.getTime() - open.lastSeenAt.getTime() >= CONDITION_REFRESH_MS) {
+      await tx.alert.update({
+        where: { id: open.id },
+        data: { lastSeenAt: input.at, summary: input.summary },
+      });
+    }
+    return { id: open.id, created: false };
+  }
+
+  /** Whether any alert, open or closed, has this group key (one per finding, never raised twice). */
+  async exists(tx: Tx, groupKey: string): Promise<boolean> {
+    return (await tx.alert.findFirst({ where: { groupKey }, select: { id: true } })) !== null;
+  }
+
+  /**
+   * A condition that cleared (a source back, a queue drained): its open alert
+   * resolved by Audit Hub itself, with the reason in its history.
+   */
+  async resolveCleared(tx: Tx, groupKey: string, note: string): Promise<string | null> {
+    const open = await tx.alert.findFirst({
+      where: { groupKey, status: { in: ['open', 'in_review'] } },
+      select: { id: true, status: true },
+    });
+    if (open === null) return null;
+    await tx.alert.update({
+      where: { id: open.id },
+      data: {
+        status: 'resolved',
+        resolvedAt: new Date(),
+        resolvedById: null,
+        version: { increment: 1 },
+      },
+    });
+    await tx.alertActivity.create({
+      data: {
+        alertId: open.id,
+        kind: 'status_changed',
+        fromStatus: open.status,
+        toStatus: 'resolved',
+        note,
+      },
+    });
+    return open.id;
   }
 
   private async manageable(user: RequestUser, id: string) {
     const row = await this.prisma.alert.findUnique({
       where: { id },
-      select: { id: true, appId: true, status: true, assigneeId: true },
+      select: {
+        id: true,
+        appId: true,
+        status: true,
+        assigneeId: true,
+        acknowledgedAt: true,
+        acknowledgedById: true,
+      },
     });
     if (row === null || !(await this.access.canSee(user, row.appId))) {
       throw new NotFoundException('Alert not found');
@@ -542,7 +837,8 @@ function tally(values: (string | null | undefined)[]): { value: string; count: n
     .slice(0, TALLY_LIMIT);
 }
 
-function toResponse(
+/** An alert's row as the API answers it, with its subject's name and the silence that covers it. */
+export function toResponse(
   row: {
     id: string;
     appId: string;
@@ -558,9 +854,16 @@ function toResponse(
     assigneeId: string | null;
     resolvedAt: Date | null;
     resolvedById: string | null;
+    acknowledgedAt: Date | null;
+    acknowledgedById: string | null;
+    escalations: number;
+    lastEscalatedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
     version: number;
   },
   subjectLabel: string | null,
+  mute: ActiveMute | null = null,
 ): AlertResponse {
   return {
     id: row.id,
@@ -578,6 +881,42 @@ function toResponse(
     assigneeId: row.assigneeId,
     resolvedAt: row.resolvedAt?.toISOString() ?? null,
     resolvedById: row.resolvedById,
+    acknowledgedAt: row.acknowledgedAt?.toISOString() ?? null,
+    acknowledgedById: row.acknowledgedById,
+    escalations: row.escalations,
+    lastEscalatedAt: row.lastEscalatedAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    mutedUntil: mute?.until.toISOString() ?? null,
+    updatedAt: row.updatedAt.toISOString(),
     version: row.version,
   };
+}
+
+const SEARCH_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A search: an alert's id, its rule or the start of it, words of its title, or its subject's id. */
+function searchOf(q: string): Prisma.AlertWhereInput {
+  return {
+    OR: [
+      ...(SEARCH_UUID.test(q) ? [{ id: q.toLowerCase() }] : []),
+      { rule: { startsWith: q.toLowerCase() } },
+      { title: { contains: q, mode: 'insensitive' } },
+      { subject: q },
+    ],
+  };
+}
+
+/** The list's order: the field asked, then the id, so pages never overlap. */
+function orderOf(query: AlertListQuery): Prisma.AlertOrderByWithRelationInput[] {
+  const field = {
+    last_seen: 'lastSeenAt',
+    first_seen: 'firstSeenAt',
+    severity: 'severity',
+    status: 'status',
+  }[query.sort] as 'lastSeenAt' | 'firstSeenAt' | 'severity' | 'status';
+  return [
+    { [field]: query.order },
+    ...(field === 'lastSeenAt' ? [] : [{ lastSeenAt: 'desc' as const }]),
+    { id: query.order },
+  ];
 }

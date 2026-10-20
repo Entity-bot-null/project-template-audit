@@ -22,6 +22,7 @@ export const WEB_VITALS_ROUTES = [
   '/revert-email-change',
   '/accept-invitation',
   '/account',
+  '/account/notifications',
   '/admin/users',
   '/admin/invitations',
   // The admin pages (docs/adr/0014).
@@ -32,6 +33,8 @@ export const WEB_VITALS_ROUTES = [
   '/security',
   '/alerts',
   '/alerts/:alertId',
+  '/soc',
+  '/detection-rules',
   '/exports',
   '/apps',
   '/apps/new',

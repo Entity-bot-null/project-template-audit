@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlertsService } from '../alerts/alerts.service.js';
+import { ruleSettings } from '../alerts/rule-settings.testing.js';
 import type { EnrichmentService } from '../enrichment/enrichment.service.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
 import type { ResponseActionsService } from '../response-actions/response-actions.service.js';
@@ -55,7 +56,7 @@ function event(overrides: Partial<RuleEvent> = {}): RuleEvent {
   };
 }
 
-function setup() {
+function setup(settings = ruleSettings()) {
   const tx = {
     $queryRaw: vi.fn(() => Promise.resolve([] as unknown[])),
     actorProfile: {
@@ -98,6 +99,7 @@ function setup() {
     webhooks as unknown as WebhookOutboxService,
     responseActions as unknown as ResponseActionsService,
     enrichment as unknown as EnrichmentService,
+    settings,
   );
   return { tx, prisma, alerts, webhooks, responseActions, service };
 }
@@ -201,6 +203,36 @@ describe('RealtimeRulesService', () => {
       });
       expect(alerts.raise.mock.calls[1]?.[1].summary).toMatchObject({ daysAway: 100 });
       expect(tx.actorProfile.update).toHaveBeenCalled();
+    });
+
+    it('detects nothing for a rule turned off (no alert, no "Was it you?"), and uses the thresholds set', async () => {
+      const off = setup(ruleSettings({ suspicious_sign_in: { enabled: false } }));
+      await off.service.evaluate(off.tx as never, event());
+      expect(rules(off.alerts)).toEqual([]);
+      expect(off.webhooks.toApp).not.toHaveBeenCalled();
+      // What the rules remember still is: the next sign-in compares with it.
+      expect(off.tx.actorDevice.upsert).toHaveBeenCalled();
+
+      const tuned = setup(
+        ruleSettings({
+          dormant_account: { params: { days: 120 } },
+          suspicious_sign_in: { params: { impossibleSpeedKmh: 20_000 } },
+        }),
+      );
+      tuned.tx.actorDevice.findUnique.mockResolvedValue({ deviceKey: 'x' });
+      tuned.tx.actorProfile.findUnique.mockResolvedValue({
+        lastSeenAt: new Date(AT.getTime() - 100 * 86_400_000),
+        lastLatitude: '40.416',
+        lastLongitude: '-3.703',
+        lastAccuracyKm: 10,
+        lastLocationAt: new Date(AT.getTime() - 3_600_000),
+      });
+      await tuned.service.evaluate(tuned.tx as never, event({ geoAsn: 64666 }));
+      // 100 days is under 120; 9,000 km in an hour is under 20,000 km/h: a hosting IP only.
+      expect(rules(tuned.alerts)).toEqual(['suspicious_sign_in']);
+      expect(tuned.alerts.raise.mock.calls[0]?.[1]).toMatchObject({
+        summary: { signals: ['hosting_ip'] },
+      });
     });
 
     it('finds a dormant account the rules forgot, from its last event', async () => {

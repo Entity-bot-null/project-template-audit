@@ -766,7 +766,8 @@ send SMTP (DigitalOcean blocks ports 25, 465 and 587 on many accounts): use the 
 (`smtp://<user>:<password>@<provider host>:2525`, STARTTLS) or ask DigitalOcean's support.
 
 **Alert channels** (optional): in `api.env`, `AUDIT_SLACK_WEBHOOK_URL=<the Slack incoming webhook>`
-or `AUDIT_TEAMS_WEBHOOK_URL=<the Teams workflow's URL>`: new alerts from medium severity
+or `AUDIT_TEAMS_WEBHOOK_URL=<the Teams workflow's URL>`: new alerts from medium severity, and
+those nobody acknowledges again as each severity's escalation says (set under **Detection rules**)
 ([manual](manual.md#116-audit-hub-alert-notifications-and-ip-geolocation)). **IP geolocation**
 (optional): the files and the `GEOIP_*` variables of
 [deploy-vps.md](deploy-vps.md#ip-geolocation), in `/srv/app/geoip` and `api.env`.
@@ -894,7 +895,9 @@ password manager): each one signs in once without the phone. From then on every 
 the password and a code.
 
 **Check:** after the second factor, the Overview opens (empty until an application is connected,
-phase 9), and the menu shows Applications, Retention, Integrity, Users and Invitations.
+phase 9), the menu shows Applications, Retention, Integrity, Users and Invitations, and the header
+says **Live** within a few seconds (the panel's live alerts reach it through Caddy; another proxy
+in front must not buffer them: [deploy-vps.md](deploy-vps.md#how-it-works)).
 
 **The other people** come by invitation, from the admin pages (email on, 7.6):
 
@@ -989,7 +992,11 @@ server) and redeploy the project.
 - within a minute, the **Overview** shows the application with its last heartbeat;
 - sign in to the project (a wrong password counts too): **Events** shows the event;
 - with a webhook URL: the application's page → **Webhooks** → **Send a test**, and the delivery
-  below it shows `delivered`.
+  below it shows `delivered`;
+- the **SOC view** shows the application's source as **Active**. Stop the project: after its
+  heartbeat timeout the source turns **Disconnected** and a `source_silent` alert opens (with a
+  notice and, once you clicked the page, its sound); start it again and the alert resolves by
+  itself.
 
 **If it fails:** no heartbeat after a few minutes means the project cannot reach Audit Hub or is
 refused: with the project's metrics on (OpenTelemetry), the connector's

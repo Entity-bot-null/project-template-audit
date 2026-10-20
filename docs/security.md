@@ -499,8 +499,12 @@ severity's weight) as high risk, and the explorer filters by it (`minRisk`).
 
 ### The rules
 
-Audit Hub reads every event twice (`apps/api/src/rules`). Thresholds are in
-`rules/rules.constants.ts`: starting points, tuned with real traffic in a reviewed change.
+Audit Hub reads every event twice (`apps/api/src/rules`), and the sources' state every minute.
+The catalog (`apps/api/src/alerts/rule-catalog.ts`, served by `GET /api/detection-rules` and
+shown under Detection rules) says what each rule looks for in words that claim no more than it
+does, its severity, how its detections group into one alert, its window and whether it resolves
+by itself. The thresholds below are its defaults (`rules/rules.constants.ts`): an administrator
+tunes them within bounds ([below](#tuning-floods-and-silences)).
 
 - **On every event** (`realtime-rules.service.ts`), in order behind a cursor, 20 s after the event
   (an ingest transaction may still commit until then), one instance at a time:
@@ -523,6 +527,17 @@ Audit Hub reads every event twice (`apps/api/src/rules`). Thresholds are in
   used by two accounts within an hour (`token_reuse`, critical); one IP failing against two
   applications that have correlation on (`multi_app_attack`). A group alerts again only with
   events newer than the previous run.
+- **Every minute, over the sources** (`source-health-rules.service.ts`, `sources/`), one
+  instance at a time: no heartbeat from the application's connector within its heartbeat timeout
+  after one was seen (`source_silent`, high); its oldest queued event older than 15 minutes, as
+  its heartbeat reports (`source_backlog`, medium); 20 events refused by validation within 15
+  minutes (`ingest_rejections`, medium, its reasons counted); events the connector numbered and
+  Audit Hub has not received after 10 minutes (`coverage_gap`, high: inferred from the sequence
+  numbers, never from silence alone). Each is one alert while it lasts and is resolved by Audit
+  Hub once it clears, with a note in its history. A source with heartbeats and no events is
+  idle, never an alert: no events is not a loss. A failed integrity verification, whatever ran it
+  (the daily job, the CLI), raises one critical `integrity_failure` per application it names,
+  never resolved by itself.
 
 Alerts are grouped (one open alert per rule and subject or source: a repeat adds an occurrence)
 and carry ids, counts, countries and signals, never an email or an IP: an address is named by an
@@ -539,12 +554,87 @@ personal data is kept) and the accounts working on it. All of it is looked up wh
 alert itself keeps ids. The list names each alert's person too, one query per page; both reads
 are recorded (`hub.alerts.searched`, `hub.alert.viewed`). A new alert notifies the application (webhook
 `alert.created`), the chat channels from medium severity, and by email the administrators and the
-application's auditors from high. Rules never act on a person: every action is a human's request
+application's auditors from high, unless a silence covers it (below): the application's webhook is
+its integration and always goes. Rules never act on a person: every action is a human's request
 ([ADR 0013](adr/0013-deliver-webhooks-and-response-actions-through-an-outbox.md)), which keeps
 automated decisions out of reach of the data subject (LFPDPPP and GDPR opposition to automated
 processing). Alerts, their notes and assignments are visible per application: administrators see
 every one, auditors and viewers those assigned to them (`user_app_assignments`); viewers only
 read; any other answers 404, as one that does not exist.
+
+Closing an alert (resolved, false positive) takes a reason of 10 to 500 characters, kept in its
+history; reopening one starts its escalation over. Acknowledging it (`POST
+/api/alerts/:id/acknowledge`, or moving it to In review) records who took it on and when, makes
+them its assignee when nobody is, and stops its escalation.
+
+### Tuning, floods and silences
+
+- **Settings per rule** (`detection_rule_settings`, `PUT /api/detection-rules/:rule`): on or off
+  (off, it raises nothing: what it would detect goes unnoticed, and a suspicious sign-in sends no
+  "Was it you?"); a severity in place of its own, for rules that have one fixed; each parameter
+  a whole number within the catalog's bounds. Administrators only, after a step-up; recorded
+  (`hub.detection_rule.changed`). The rules read them from a 30-second snapshot: every instance
+  applies a change within that time. Settings are global, not per application.
+- **Floods:** a rule opens at most 20 new alerts per application within an hour; past that, its
+  new detections fold into one alert of that rule and application, so a flood never buries the
+  rest nor floods the channels. Repeats of an open alert are occurrences, never new alerts (the
+  unique index `alerts_open_group_key`, under concurrency too).
+- **Silences** (`alert_mutes`, `POST /api/alert-mutes`): of one rule or every rule of an
+  application, from 5 minutes to a week, with a reason of 10 to 500 characters; administrators
+  and the auditors assigned to the application; lifted early from the alert's page
+  (`POST /api/alert-mutes/:id/end`), kept as ended. Covered alerts are raised, counted, kept and
+  shown as always; email, chat, escalation and the panel's sounds and browser notices stay
+  quiet. Each change is recorded (`hub.alert_mute.changed`).
+
+### Escalation
+
+An open alert nobody acknowledged, without a silence in force, is sent again
+(`alert-escalation.service.ts`, every minute, one instance at a time) as its severity's policy
+says (`escalation_policies`, `PUT /api/escalation-policies/:severity`, administrators after a
+step-up, `hub.escalation_policy.changed`): after a first delay, then at an interval, a number of
+times at most, by email to the administrators and the application's auditors and to the chat
+channels, through the same durable outboxes as its first notification (retried, never twice).
+By default critical alerts escalate after 15 minutes, then every 30, 3 times; high after 60,
+then every 120, twice; the others do not. Each escalation is in the alert's history, also when
+no channel could carry it; an email is dropped if the alert was acknowledged meanwhile. Alerts
+already open when the policies arrived count from then: deploying them escalates nothing at once.
+
+### The live stream and the panel's notices
+
+`GET /api/alerts/stream` (Server-Sent Events, `alert-stream.service.ts`) sends every change of
+an alert the caller may see, as the list does (ids, counts, titles, never an email or an
+address), so the panel updates its counters and lists and announces what is new without
+reloading:
+
+- **Authenticated like any request:** the access token in the `Authorization` header (the
+  panel reads the stream with `fetch`: an `EventSource` would put it in the URL); the caller's
+  access is checked again every minute and the stream ends when it is lost; it ends after 10
+  minutes anyway (the browser reconnects, authenticated again). Opening one is recorded
+  (`hub.alerts.streamed`) and rate limited.
+- **Bounded:** 5 streams per person, 500 per instance; 2 s between reads of the changes (one
+  indexed query for all of an instance's listeners); a keep-alive every 25 s; a slow reader
+  over 1 MB behind is dropped.
+- **The database is the source of truth:** no broker, safe with several instances. Each event
+  carries a cursor (`updatedAt|id`); a reconnection sends it back (`Last-Event-ID`) and gets what
+  changed since, up to 200 changes, else a `resync` (the panel reloads what it shows).
+- **Proxies:** the stream answers `Cache-Control: no-store, no-transform` and
+  `X-Accel-Buffering: no`, so nginx (the web image) passes each event at once; Caddy
+  ([deploy-vps.md](deploy-vps.md#how-it-works)) flushes `text/event-stream` immediately and does not compress
+  it (checked with Caddy 2.11 and `encode zstd gzip`). Another proxy must neither buffer nor
+  compress it, and must allow an idle read of at least 30 s.
+
+In the browser (`apps/web/src/audit/live`), one tab holds the connection (a Web Lock) and shares
+what it hears with the others (a BroadcastChannel); that tab alone plays sounds and shows the
+browser's notices, so a person hears each alert once. News is an open alert just opened, one
+whose severity rose or one escalated again; replays, updates and closings only refresh the
+lists. Each person's preferences (`notification_preferences`, their own only:
+`/api/account/notification-preferences`) choose the severities that sound (Web Audio patterns,
+played after a gesture of the person, as browsers require), the volume, a critical alert's sound
+again while nobody acknowledges it (a few times at most), the browser's notices (the
+Notification API, asked for from a click only, while a tab is open: no push service), a quiet
+time of at most a week and applications never heard about. A browser notice carries the alert's
+severity, application and title only. Silencing sounds never acknowledges, resolves nor hides
+an alert.
 
 ## Webhooks and response actions
 

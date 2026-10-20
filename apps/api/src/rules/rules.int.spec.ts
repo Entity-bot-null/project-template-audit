@@ -462,7 +462,8 @@ describe('rules, alerts, webhooks and response actions (integration)', () => {
         await patch({ status: 'in_review', assigneeId: auditor.id, version: 0 }).expect(200),
       ).data;
       expect(reviewed).toMatchObject({ status: 'in_review', assigneeId: auditor.id, version: 1 });
-      await patch({ status: 'resolved', version: 0 }).expect(409);
+      // A stale version, however valid the rest: 409.
+      await patch({ status: 'resolved', reason: 'The user confirmed it.', version: 0 }).expect(409);
       await patch({ assigneeId: other.id, version: 1 }).expect(409);
       await request(t.server)
         .post(`/api/alerts/${alert.id}/notes`)
@@ -470,9 +471,17 @@ describe('rules, alerts, webhooks and response actions (integration)', () => {
         .send({ note: 'The user confirmed the new phone.' })
         .expect(201);
       const resolved = envelopeOf<AlertDetailResponse>(
-        await patch({ status: 'false_positive', version: 1 }).expect(200),
+        await patch({
+          status: 'false_positive',
+          reason: 'The user confirmed the new phone.',
+          version: 1,
+        }).expect(200),
       ).data;
       expect(resolved.status).toBe('false_positive');
+      // Why, in its history.
+      expect(
+        resolved.activities.find((activity) => activity.toStatus === 'false_positive'),
+      ).toMatchObject({ note: 'The user confirmed the new phone.' });
       expect(resolved.resolvedById).toBe(auditor.id);
       expect(resolved.resolvedByLabel).toBe(auditor.name);
       expect(resolved.activities.find((activity) => activity.kind === 'assigned')).toMatchObject({

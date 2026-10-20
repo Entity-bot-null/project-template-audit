@@ -25,7 +25,9 @@ Deliverables:
   - [0013](../../adr/0013-deliver-webhooks-and-response-actions-through-an-outbox.md) webhooks and response actions;
   - [0014](../../adr/0014-build-the-admin-pages-lazily-with-own-svg-charts.md) admin pages;
   - [0015](../../adr/0015-say-who-acted-and-from-where-precisely.md) names, masked phones, client
-    hints and a precise position when a session starts.
+    hints and a precise position when a session starts;
+  - [0016](../../adr/0016-deliver-alerts-live-tunable-and-escalating.md) live alerts, tunable
+    rules, silences, escalation and the sources' health.
 
 ## Decisions taken
 

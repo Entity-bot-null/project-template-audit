@@ -32,7 +32,18 @@ function ActivityLine({ activity }: { activity: Activity }) {
         ? ' to nobody'
         : ` to ${activity.assigneeLabel ?? activity.note}`;
   } else if (activity.fromStatus !== null && activity.toStatus !== null) {
-    said = `: ${words(activity.fromStatus)} → ${words(activity.toStatus)}`;
+    // With why, when it was closed (or resolved by Audit Hub itself).
+    said = (
+      <>
+        {`: ${words(activity.fromStatus)} → ${words(activity.toStatus)}`}
+        {activity.note !== null && (
+          <>
+            {', '}
+            <q>{activity.note}</q>
+          </>
+        )}
+      </>
+    );
   } else if (activity.note !== null) {
     said = (
       <>
@@ -131,6 +142,22 @@ export function AlertView({
                   : alert.assigneeId === me
                     ? 'you'
                     : (alert.assigneeLabel ?? alert.assigneeId),
+              ],
+              [
+                'Acknowledged',
+                alert.acknowledgedAt === null
+                  ? null
+                  : `${formatDateTime(alert.acknowledgedAt)}${alert.acknowledgedByLabel === null ? '' : ` by ${alert.acknowledgedByLabel}`}`,
+              ],
+              [
+                'Escalated',
+                alert.escalations === 0
+                  ? null
+                  : `${formatNumber(alert.escalations)} ${alert.escalations === 1 ? 'time' : 'times'}${alert.lastEscalatedAt === null ? '' : `, last ${formatDateTime(alert.lastEscalatedAt)}`}`,
+              ],
+              [
+                'Silenced until',
+                alert.mutedUntil === null ? null : formatDateTime(alert.mutedUntil),
               ],
               [
                 'Resolved',

@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AlertsService } from '../alerts/alerts.service.js';
+import { ruleSettings } from '../alerts/rule-settings.testing.js';
 import type { JobRunsService } from '../integrity/job-runs.service.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
 import { PeriodicRulesService } from './periodic-rules.service.js';
@@ -20,7 +21,7 @@ const group = (key: string, overrides: Record<string, unknown> = {}) => ({
 });
 
 /** The rules' queries in the order run() makes them, each answering `answers[i]`. */
-function setup(answers: unknown[][] = []) {
+function setup(answers: unknown[][] = [], settings = ruleSettings()) {
   const queue = [[{ locked: true, horizon: HORIZON }], ...answers];
   const tx = {
     $queryRaw: vi.fn(() => Promise.resolve(queue.shift() ?? [])),
@@ -54,6 +55,7 @@ function setup(answers: unknown[][] = []) {
     alerts as unknown as AlertsService,
     jobs as unknown as JobRunsService,
     Buffer.alloc(32, 7),
+    settings,
   );
   return { tx, prisma, alerts, jobs, service };
 }
@@ -102,6 +104,39 @@ describe('PeriodicRulesService', () => {
     expect(tx.ruleCursor.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ update: { recordedAt: HORIZON } }),
     );
+  });
+
+  it('queries nothing for the rules turned off, and uses the thresholds set', async () => {
+    const settings = ruleSettings({
+      brute_force_account: { enabled: false },
+      brute_force_ip: { enabled: false },
+      credential_stuffing: { enabled: false },
+      multi_app_attack: { enabled: false },
+      mass_delete: { enabled: false },
+      mass_read: { enabled: false },
+      mass_export: { params: { count: 9 } },
+      token_reuse: { params: { accounts: 4 } },
+    });
+    const { tx, alerts, service } = setup(
+      [
+        [group('user-3', { count: 9 })], // bulk exports: the only failures-free query left
+        [], // one session, several accounts
+      ],
+      settings,
+    );
+    await expect(service.run()).resolves.toEqual({ mass_export: 1 });
+    // The lock, bulk exports, the session reuse: no failed sign-in query at all.
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(3);
+    const values = tx.$queryRaw.mock.calls.map((call) => (call as unknown[]).slice(1));
+    expect(values[1]).toContain(9);
+    expect(values[2]).toContain(4);
+    expect(alerts.raise).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts only what was raised: a rule turned off in between raises nothing', async () => {
+    const { alerts, service } = setup([[group('user-9')]]);
+    alerts.raise.mockResolvedValueOnce(null as never);
+    await expect(service.run()).resolves.toEqual({});
   });
 
   it('only alerts with evidence newer than its previous run', async () => {

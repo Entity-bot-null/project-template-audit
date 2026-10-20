@@ -12,15 +12,28 @@ const listOf = <T extends readonly [string, ...string[]]>(values: T) =>
     z.array(z.enum(values)).min(1).max(values.length),
   );
 
+const RULE_ID = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
+
+export const ALERT_SORTS = ['last_seen', 'first_seen', 'severity', 'status'] as const;
+
 export const AlertListQuerySchema = z.object({
   appId: z.uuid().optional(),
   status: listOf(ALERT_STATUSES).optional(),
   severity: listOf(SEVERITY_VALUES).optional(),
-  rule: z
-    .string()
-    .regex(/^[a-z][a-z0-9_]{0,63}$/)
-    .optional(),
+  rule: RULE_ID.optional(),
   assigneeId: z.uuid().optional(),
+  /**
+   * An alert's id, its rule (or the start of it), words of its title, or the
+   * id of the user it is about.
+   */
+  q: z.string().trim().min(1).max(100).optional(),
+  /** Last seen from, to (inclusive). */
+  from: z.iso.datetime().optional(),
+  to: z.iso.datetime().optional(),
+  /** true: only alerts a silence covers now; false: only the others. */
+  muted: z.enum(['true', 'false']).optional(),
+  sort: z.enum(ALERT_SORTS).default('last_seen'),
+  order: z.enum(['asc', 'desc']).default('desc'),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -49,6 +62,18 @@ export const AlertSchema = z.object({
   assigneeId: z.uuid().nullable(),
   resolvedAt: z.iso.datetime().nullable(),
   resolvedById: z.uuid().nullable(),
+  /** Who first took it on (Acknowledge, or In review): its escalation stopped there. */
+  acknowledgedAt: z.iso.datetime().nullable(),
+  acknowledgedById: z.uuid().nullable(),
+  /** How many times it was escalated while nobody acknowledged it, the last one when. */
+  escalations: z.int(),
+  lastEscalatedAt: z.iso.datetime().nullable(),
+  /** When Audit Hub opened it (firstSeenAt is when its first detection happened). */
+  createdAt: z.iso.datetime(),
+  /** Until when a silence covers it (nobody is notified); null when none does. */
+  mutedUntil: z.iso.datetime().nullable(),
+  /** The last change of it, any change: the live stream's order. */
+  updatedAt: z.iso.datetime(),
   /** Send it back with a change: 409 when someone changed the alert since. */
   version: z.int(),
 });
@@ -89,10 +114,11 @@ export const AlertDetailSchema = AlertSchema.extend({
   /** The names of Audit Hub's accounts that work on it. */
   assigneeLabel: z.string().nullable(),
   resolvedByLabel: z.string().nullable(),
+  acknowledgedByLabel: z.string().nullable(),
   activities: z.array(
     z.object({
       id: z.uuid(),
-      /** created, notified, status_changed, assigned, note (alert_activities_kind_check). */
+      /** created, notified, status_changed, assigned, note, acknowledged, escalated (alert_activities_kind_check). */
       kind: z.string(),
       userId: z.uuid().nullable(),
       /** Who did it, by the name of their account. */
@@ -115,15 +141,82 @@ export const UpdateAlertSchema = z
     status: z.enum(ALERT_STATUSES).optional(),
     /** null unassigns. */
     assigneeId: z.uuid().nullable().optional(),
+    /** Why: required to resolve it or close it as a false positive; kept in its history. */
+    reason: z.string().trim().min(10).max(500).optional(),
     version: z.int().min(0),
   })
   .refine(
     (value) => value.status !== undefined || value.assigneeId !== undefined,
     'nothing to change',
+  )
+  .refine(
+    (value) =>
+      (value.status !== 'resolved' && value.status !== 'false_positive') ||
+      value.reason !== undefined,
+    { message: 'Say why, in 10 characters or more', path: ['reason'] },
   );
 export type UpdateAlertDto = z.infer<typeof UpdateAlertSchema>;
+
+/** Taking it on: In review, the caller its assignee when nobody is. */
+export const AcknowledgeAlertSchema = z.object({ version: z.int().min(0) });
 
 export const AlertNoteSchema = z.object({
   /** Free text for the people working on it: never paste personal data from elsewhere. */
   note: z.string().trim().min(1).max(2000),
 });
+
+const BY_SEVERITY = z.object(
+  Object.fromEntries(SEVERITY_VALUES.map((severity) => [severity, z.int()])) as Record<
+    (typeof SEVERITY_VALUES)[number],
+    z.ZodInt
+  >,
+);
+
+/** The unresolved alerts of the applications the caller sees, counted now. */
+export const AlertSummarySchema = z.object({
+  /** Open: nobody acknowledged them yet. */
+  open: BY_SEVERITY,
+  inReview: BY_SEVERITY,
+  /** Unresolved alerts a silence covers now. */
+  muted: z.int(),
+  /** The oldest alert nobody acknowledged: how long it has waited. */
+  oldestOpenAt: z.iso.datetime().nullable(),
+});
+export type AlertSummaryResponse = z.infer<typeof AlertSummarySchema>;
+
+export const AlertSummaryQuerySchema = z.object({ appId: z.uuid().optional() });
+
+export const AlertMuteSchema = z.object({
+  id: z.uuid(),
+  appId: z.uuid(),
+  appSlug: z.string(),
+  /** null: every rule of the application. */
+  rule: z.string().nullable(),
+  reason: z.string(),
+  until: z.iso.datetime(),
+  createdById: z.uuid(),
+  createdAt: z.iso.datetime(),
+  endedAt: z.iso.datetime().nullable(),
+  endedById: z.uuid().nullable(),
+  /** In force now. */
+  active: z.boolean(),
+});
+export type AlertMuteResponse = z.infer<typeof AlertMuteSchema>;
+
+export const AlertMuteListSchema = z.object({ items: z.array(AlertMuteSchema) });
+
+export const CreateAlertMuteSchema = z.object({
+  appId: z.uuid(),
+  /** null: every rule of the application. */
+  rule: RULE_ID.nullable(),
+  /** From 5 minutes to a week. */
+  minutes: z
+    .int()
+    .min(5)
+    .max(7 * 24 * 60),
+  /** Why, for the people who will see it silenced. */
+  reason: z.string().trim().min(10).max(500),
+});
+export type CreateAlertMuteDto = z.infer<typeof CreateAlertMuteSchema>;
+
+export const AlertMuteQuerySchema = z.object({ appId: z.uuid().optional() });

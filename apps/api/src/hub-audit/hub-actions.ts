@@ -140,6 +140,46 @@ export const HUB_ACTIONS = {
         status: { type: 'enum', values: ['open', 'in_review', 'resolved', 'false_positive'] },
         assigneeId: { type: 'uuid' },
         note: { type: 'boolean' },
+        acknowledged: { type: 'boolean' },
+        reason: { type: 'boolean' },
+      },
+    },
+  }),
+  'hub.alert_mute.changed': action(
+    'audit',
+    'medium',
+    "Silenced an application's alerts, or lifted a silence.",
+    {
+      resourceType: 'alert_mute',
+      details: {
+        fields: {
+          appId,
+          rule: { type: 'string', maxLength: 64 },
+          change: { type: 'enum', values: ['created', 'ended'] },
+          minutes: { type: 'integer', min: 5, max: 10080 },
+        },
+      },
+    },
+  ),
+  'hub.detection_rule.changed': action('audit', 'high', 'Changed a detection rule.', {
+    resourceType: 'detection_rule',
+    details: {
+      fields: {
+        enabled: { type: 'boolean' },
+        severity: { type: 'enum', values: ['info', 'low', 'medium', 'high', 'critical'] },
+        params: { type: 'string[]', maxItems: 10, maxLength: 40 },
+      },
+    },
+  }),
+  'hub.escalation_policy.changed': action('audit', 'high', 'Changed an escalation policy.', {
+    resourceType: 'escalation_policy',
+    details: {
+      fields: {
+        enabled: { type: 'boolean' },
+        firstAfterMinutes: { type: 'integer', min: 1, max: 10080 },
+        repeatEveryMinutes: { type: 'integer', min: 5, max: 10080 },
+        maxEscalations: { type: 'integer', min: 1, max: 10 },
+        channels: { type: 'string[]', maxItems: 2, maxLength: 8 },
       },
     },
   }),
@@ -220,6 +260,9 @@ export const HUB_ACTIONS = {
         results: { type: 'integer', min: 0 },
       },
     },
+  }),
+  'hub.alerts.streamed': action('audit_access', 'info', 'Opened the live stream of alerts.', {
+    details: { fields: { replay: { type: 'boolean' } } },
   }),
   'hub.alert.viewed': action('audit_access', 'info', 'Opened an alert.', {
     resourceType: 'alert',

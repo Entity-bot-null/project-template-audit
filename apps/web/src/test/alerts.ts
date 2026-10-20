@@ -1,4 +1,4 @@
-import type { AlertDetail } from '../audit/types';
+import type { Alert, AlertDetail } from '../audit/types';
 import { eventSummary, SHOP } from './events';
 
 // An alert as the API answers it (GET /api/alerts/:id), for the specs of the
@@ -25,6 +25,13 @@ export function alertDetail(overrides: Partial<AlertDetail> = {}): AlertDetail {
     assigneeId: null,
     resolvedAt: null,
     resolvedById: null,
+    acknowledgedAt: null,
+    acknowledgedById: null,
+    escalations: 0,
+    lastEscalatedAt: null,
+    mutedUntil: null,
+    createdAt: '2026-10-14T08:00:00.000Z',
+    updatedAt: '2026-10-15T09:30:00.000Z',
     version: 3,
     summary: { failures: 12, window: '10 minutes' },
     explanation: {
@@ -47,6 +54,7 @@ export function alertDetail(overrides: Partial<AlertDetail> = {}): AlertDetail {
     },
     assigneeLabel: null,
     resolvedByLabel: null,
+    acknowledgedByLabel: null,
     activities: [
       {
         id: 'act-1',
@@ -82,5 +90,60 @@ export function alertDetail(overrides: Partial<AlertDetail> = {}): AlertDetail {
       }),
     ],
     ...overrides,
+  };
+}
+
+/** An alert as the lists and the live stream send it: just opened, high, nobody on it. */
+export function alertRow(overrides: Partial<Alert> = {}): Alert {
+  const now = new Date().toISOString();
+  return {
+    id: ALERT_ID,
+    appId: SHOP,
+    appSlug: 'shop',
+    rule: 'brute_force',
+    severity: 'high',
+    status: 'open',
+    subject: 'user-42',
+    subjectLabel: 'Ann Example',
+    title: 'Many failed sign-ins',
+    occurrences: 1,
+    firstSeenAt: now,
+    lastSeenAt: now,
+    assigneeId: null,
+    resolvedAt: null,
+    resolvedById: null,
+    acknowledgedAt: null,
+    acknowledgedById: null,
+    escalations: 0,
+    lastEscalatedAt: null,
+    createdAt: now,
+    mutedUntil: null,
+    updatedAt: now,
+    version: 1,
+    ...overrides,
+  };
+}
+
+/** A live stream the spec feeds frame by frame (GET /api/alerts/stream). */
+export function liveFeed() {
+  const encoder = new TextEncoder();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(started) {
+      controller = started;
+    },
+  });
+  return {
+    response: () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    send(event: string, data: unknown, id?: string) {
+      const head = id === undefined ? '' : `id: ${id}\n`;
+      controller.enqueue(
+        encoder.encode(`${head}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+      );
+    },
+    close() {
+      controller.close();
+    },
   };
 }

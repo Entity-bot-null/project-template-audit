@@ -30,6 +30,19 @@ export interface SignInFacts {
   lastSeenAt: Date | null;
 }
 
+/** The rules' thresholds (detection_rule_settings over rules.constants.ts). */
+export interface SignInThresholds {
+  impossibleSpeedKmh: number;
+  locationMismatchKm: number;
+  dormantDays: number;
+}
+
+export const DEFAULT_SIGN_IN_THRESHOLDS: SignInThresholds = {
+  impossibleSpeedKmh: IMPOSSIBLE_SPEED_KMH,
+  locationMismatchKm: LOCATION_MISMATCH_KM,
+  dormantDays: DORMANT_DAYS,
+};
+
 export interface SignInVerdict {
   signals: SuspiciousSignal[];
   /** Back after DORMANT_DAYS or more without activity. */
@@ -41,7 +54,10 @@ export interface SignInVerdict {
 }
 
 /** Pure: the rules applied to one sign-in (docs/security.md#detection-rules). */
-export function signInSignals(facts: SignInFacts): SignInVerdict {
+export function signInSignals(
+  facts: SignInFacts,
+  thresholds: SignInThresholds = DEFAULT_SIGN_IN_THRESHOLDS,
+): SignInVerdict {
   const signals: SuspiciousSignal[] = [];
   if (facts.hasDevices && !facts.knownDevice) signals.push('new_device');
   if (facts.country !== null && facts.hasCountries && !facts.knownCountry) {
@@ -51,7 +67,7 @@ export function signInSignals(facts: SignInFacts): SignInVerdict {
   let travel: SignInVerdict['travel'];
   if (here !== null && facts.previous !== null) {
     const speed = travelSpeedKmh(facts.previous, { ...here, at: facts.at }, TRAVEL_MIN_SECONDS);
-    if (speed !== undefined && speed > IMPOSSIBLE_SPEED_KMH) {
+    if (speed !== undefined && speed > thresholds.impossibleSpeedKmh) {
       signals.push('impossible_travel');
       travel = {
         distanceKm: Math.round(certainDistanceKm(facts.previous, here)),
@@ -65,15 +81,15 @@ export function signInSignals(facts: SignInFacts): SignInVerdict {
     facts.ipPlace === null || facts.devicePlace === null
       ? 0
       : certainDistanceKm(facts.ipPlace, facts.devicePlace);
-  if (mismatch > LOCATION_MISMATCH_KM) signals.push('location_mismatch');
+  if (mismatch > thresholds.locationMismatchKm) signals.push('location_mismatch');
   const dormant =
     facts.lastSeenAt !== null &&
-    facts.at.getTime() - facts.lastSeenAt.getTime() >= DORMANT_DAYS * DAY_MS;
+    facts.at.getTime() - facts.lastSeenAt.getTime() >= thresholds.dormantDays * DAY_MS;
   return {
     signals,
     dormant,
     ...(travel === undefined ? {} : { travel }),
-    ...(mismatch > LOCATION_MISMATCH_KM ? { mismatchKm: Math.round(mismatch) } : {}),
+    ...(mismatch > thresholds.locationMismatchKm ? { mismatchKm: Math.round(mismatch) } : {}),
   };
 }
 

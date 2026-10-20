@@ -17,12 +17,14 @@ const LOADING: LoadState<never> = { kind: 'loading' };
  * request takes a number and only the latest may set state, so a response
  * that lands after unmount, after a key change or after a retry is dropped.
  * While retrying, the failed state stays (with `retrying`), so the retry
- * button keeps its place and keyboard focus.
+ * button keeps its place and keyboard focus. `refresh` loads again quietly
+ * (live updates): what is shown stays until the new data replaces it, and a
+ * failed refresh keeps it.
  */
 export function useLoader<T>(
   load: () => Promise<ApiResult<T>>,
   key: Key = null,
-): { state: LoadState<T>; retry: () => Promise<boolean> } {
+): { state: LoadState<T>; retry: () => Promise<boolean>; refresh: () => Promise<boolean> } {
   const [stored, setStored] = useState<{ key: Key; value: LoadState<T> }>({
     key,
     value: LOADING,
@@ -38,10 +40,11 @@ export function useLoader<T>(
     stateRef.current = state;
   });
 
-  const run = useCallback(async (forKey: Key): Promise<boolean> => {
+  const run = useCallback(async (forKey: Key, quiet = false): Promise<boolean> => {
     const id = ++requestId.current;
     const result = await loadRef.current();
     if (id !== requestId.current) return false;
+    if (quiet && !result.ok) return false;
     setStored({
       key: forKey,
       value: result.ok
@@ -67,5 +70,10 @@ export function useLoader<T>(
     return run(key);
   }, [run, key]);
 
-  return { state, retry };
+  const refresh = useCallback((): Promise<boolean> => {
+    if (stateRef.current.kind !== 'loaded') return Promise.resolve(false);
+    return run(key, true);
+  }, [run, key]);
+
+  return { state, retry, refresh };
 }

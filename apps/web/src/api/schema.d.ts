@@ -488,6 +488,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/account/notification-preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your notification preferences: sounds, browser notices, quiet times */
+        get: operations["NotificationPreferencesController_get"];
+        /** Change your notification preferences */
+        put: operations["NotificationPreferencesController_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/invitations": {
         parameters: {
             query?: never;
@@ -909,6 +927,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/alerts/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The live stream of alert changes (Server-Sent Events)
+         * @description text/event-stream, read with fetch (the Bearer token in its header, never in the URL). Events: `alert` (data `{ alert, replay }`: the alert as the list answers it; `id`: the stream position), `ready` (caught up), `resync` (too many changes missed: reload the lists), `end` (`reason`: renew, access or shutdown: reconnect, except after access). Send `Last-Event-ID` to replay what changed after it. At most 5 streams per account (429); each ends after 10 minutes, its access checked again every minute.
+         */
+        get: operations["AlertsController_live"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The unresolved alerts by severity: open (unacknowledged) and in review */
+        get: operations["AlertsController_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts": {
         parameters: {
             query?: never;
@@ -947,6 +1002,26 @@ export interface paths {
         patch: operations["AlertsController_update"];
         trace?: never;
     };
+    "/api/alerts/{id}/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Acknowledge an alert: take it on (In review, yours when nobody has it); its escalation stops
+         * @description 409: closed, already acknowledged, or changed since `version` was read.
+         */
+        post: operations["AlertsController_acknowledge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/{id}/notes": {
         parameters: {
             query?: never;
@@ -958,6 +1033,115 @@ export interface paths {
         put?: never;
         /** Add a note to an alert */
         post: operations["AlertsController_addNote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alert-mutes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Silences of alerts: those in force first, then the most recent */
+        get: operations["AlertMutesController_list"];
+        put?: never;
+        /**
+         * Silence an application's alerts, of one rule or all, for a while
+         * @description The alerts are still raised, kept and shown; email, chat, escalation and the panel's sounds and browser notices stay quiet until it ends.
+         */
+        post: operations["AlertMutesController_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alert-mutes/{id}/end": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Lift a silence now (kept, as ended) */
+        post: operations["AlertMutesController_end"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/detection-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The detection rules: what each detects, its parameters and its settings */
+        get: operations["DetectionController_listRules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/detection-rules/{rule}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Turn a rule on or off, give it a severity, tune its parameters
+         * @description 400: a parameter out of its bounds, or a severity for a rule that decides its own.
+         */
+        put: operations["DetectionController_updateRule"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/escalation-policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The escalation policies, per severity, and the channels available */
+        get: operations["DetectionController_listPolicies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/escalation-policies/{severity}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Change a severity's escalation policy */
+        put: operations["DetectionController_updatePolicy"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1218,6 +1402,23 @@ export interface paths {
         put?: never;
         /** Withdraw a response action still waiting for approval */
         post: operations["ResponseActionsController_cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The event sources: connected, delayed, idle, disconnected; queues, refusals and gaps */
+        get: operations["SourcesController_list"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3355,6 +3556,155 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationPreferencesController_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            sound: {
+                                enabled: boolean;
+                                volume: number;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
+                            };
+                            browser: {
+                                enabled: boolean;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
+                            };
+                            criticalRepeat: {
+                                enabled: boolean;
+                                intervalSeconds: number;
+                                times: number;
+                            };
+                            /** Format: date-time */
+                            quietUntil: string | null;
+                            mutedAppIds: string[];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    NotificationPreferencesController_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    sound: {
+                        enabled: boolean;
+                        volume: number;
+                        severities: ("info" | "low" | "medium" | "high" | "critical")[];
+                    };
+                    browser: {
+                        enabled: boolean;
+                        severities: ("info" | "low" | "medium" | "high" | "critical")[];
+                    };
+                    criticalRepeat: {
+                        enabled: boolean;
+                        intervalSeconds: number;
+                        times: number;
+                    };
+                    /** Format: date-time */
+                    quietUntil: string | null;
+                    mutedAppIds: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            sound: {
+                                enabled: boolean;
+                                volume: number;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
+                            };
+                            browser: {
+                                enabled: boolean;
+                                severities: ("info" | "low" | "medium" | "high" | "critical")[];
+                            };
+                            criticalRepeat: {
+                                enabled: boolean;
+                                intervalSeconds: number;
+                                times: number;
+                            };
+                            /** Format: date-time */
+                            quietUntil: string | null;
+                            mutedAppIds: string[];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5673,6 +6023,141 @@ export interface operations {
             };
         };
     };
+    AlertsController_live: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The stream */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    AlertsController_summary: {
+        parameters: {
+            query?: {
+                appId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            open: {
+                                info: number;
+                                low: number;
+                                medium: number;
+                                high: number;
+                                critical: number;
+                            };
+                            inReview: {
+                                info: number;
+                                low: number;
+                                medium: number;
+                                high: number;
+                                critical: number;
+                            };
+                            muted: number;
+                            /** Format: date-time */
+                            oldestOpenAt: string | null;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     AlertsController_list: {
         parameters: {
             query?: {
@@ -5681,6 +6166,12 @@ export interface operations {
                 severity?: ("info" | "low" | "medium" | "high" | "critical")[];
                 rule?: string;
                 assigneeId?: string;
+                q?: string;
+                from?: string;
+                to?: string;
+                muted?: "true" | "false";
+                sort?: "last_seen" | "first_seen" | "severity" | "status";
+                order?: "asc" | "desc";
                 limit?: number;
                 offset?: number;
             };
@@ -5723,6 +6214,19 @@ export interface operations {
                                 resolvedAt: string | null;
                                 /** Format: uuid */
                                 resolvedById: string | null;
+                                /** Format: date-time */
+                                acknowledgedAt: string | null;
+                                /** Format: uuid */
+                                acknowledgedById: string | null;
+                                escalations: number;
+                                /** Format: date-time */
+                                lastEscalatedAt: string | null;
+                                /** Format: date-time */
+                                createdAt: string;
+                                /** Format: date-time */
+                                mutedUntil: string | null;
+                                /** Format: date-time */
+                                updatedAt: string;
                                 version: number;
                             }[];
                             total: number;
@@ -5812,6 +6316,19 @@ export interface operations {
                             resolvedAt: string | null;
                             /** Format: uuid */
                             resolvedById: string | null;
+                            /** Format: date-time */
+                            acknowledgedAt: string | null;
+                            /** Format: uuid */
+                            acknowledgedById: string | null;
+                            escalations: number;
+                            /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
+                            /** Format: date-time */
+                            mutedUntil: string | null;
+                            /** Format: date-time */
+                            updatedAt: string;
                             version: number;
                             summary: {
                                 [key: string]: unknown;
@@ -5850,6 +6367,7 @@ export interface operations {
                             };
                             assigneeLabel: string | null;
                             resolvedByLabel: string | null;
+                            acknowledgedByLabel: string | null;
                             activities: {
                                 /** Format: uuid */
                                 id: string;
@@ -5966,6 +6484,7 @@ export interface operations {
                     status?: "open" | "in_review" | "resolved" | "false_positive";
                     /** Format: uuid */
                     assigneeId?: string | null;
+                    reason?: string;
                     version: number;
                 };
             };
@@ -6003,6 +6522,19 @@ export interface operations {
                             resolvedAt: string | null;
                             /** Format: uuid */
                             resolvedById: string | null;
+                            /** Format: date-time */
+                            acknowledgedAt: string | null;
+                            /** Format: uuid */
+                            acknowledgedById: string | null;
+                            escalations: number;
+                            /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
+                            /** Format: date-time */
+                            mutedUntil: string | null;
+                            /** Format: date-time */
+                            updatedAt: string;
                             version: number;
                             summary: {
                                 [key: string]: unknown;
@@ -6041,6 +6573,221 @@ export interface operations {
                             };
                             assigneeLabel: string | null;
                             resolvedByLabel: string | null;
+                            acknowledgedByLabel: string | null;
+                            activities: {
+                                /** Format: uuid */
+                                id: string;
+                                kind: string;
+                                /** Format: uuid */
+                                userId: string | null;
+                                userLabel: string | null;
+                                fromStatus: string | null;
+                                toStatus: string | null;
+                                note: string | null;
+                                assigneeLabel: string | null;
+                                /** Format: date-time */
+                                createdAt: string;
+                            }[];
+                            events: {
+                                /** Format: uuid */
+                                id: string;
+                                /** Format: uuid */
+                                eventId: string;
+                                /** Format: uuid */
+                                appId: string;
+                                appSlug: string;
+                                /** Format: date-time */
+                                recordedAt: string;
+                                /** Format: date-time */
+                                occurredAt: string;
+                                category: string;
+                                action: string;
+                                description: string | null;
+                                outcome: string;
+                                severity: string;
+                                riskScore: number;
+                                actor: {
+                                    type: string;
+                                    id: string | null;
+                                    role: string | null;
+                                    label: string | null;
+                                };
+                                resource: {
+                                    type: string;
+                                    id: string;
+                                } | null;
+                                requestId: string | null;
+                                httpStatus: number | null;
+                                clientType: string | null;
+                                country: string | null;
+                                ipScope: string | null;
+                            }[];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description Not allowed
+             *
+             *     Not allowed
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    AlertsController_acknowledge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    version: number;
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            /** Format: uuid */
+                            appId: string;
+                            appSlug: string;
+                            rule: string;
+                            /** @enum {string} */
+                            severity: "info" | "low" | "medium" | "high" | "critical";
+                            /** @enum {string} */
+                            status: "open" | "in_review" | "resolved" | "false_positive";
+                            subject: string | null;
+                            subjectLabel: string | null;
+                            title: string;
+                            occurrences: number;
+                            /** Format: date-time */
+                            firstSeenAt: string;
+                            /** Format: date-time */
+                            lastSeenAt: string;
+                            /** Format: uuid */
+                            assigneeId: string | null;
+                            /** Format: date-time */
+                            resolvedAt: string | null;
+                            /** Format: uuid */
+                            resolvedById: string | null;
+                            /** Format: date-time */
+                            acknowledgedAt: string | null;
+                            /** Format: uuid */
+                            acknowledgedById: string | null;
+                            escalations: number;
+                            /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
+                            /** Format: date-time */
+                            mutedUntil: string | null;
+                            /** Format: date-time */
+                            updatedAt: string;
+                            version: number;
+                            summary: {
+                                [key: string]: unknown;
+                            };
+                            explanation: {
+                                looksFor: string | null;
+                                saw: string[];
+                            };
+                            evidence: {
+                                events: number;
+                                /** Format: date-time */
+                                from: string | null;
+                                /** Format: date-time */
+                                to: string | null;
+                                outcomes: {
+                                    value: string;
+                                    count: number;
+                                }[];
+                                reasons: {
+                                    value: string;
+                                    count: number;
+                                }[];
+                                actions: {
+                                    value: string;
+                                    count: number;
+                                }[];
+                                accounts: number;
+                                countries: {
+                                    value: string;
+                                    count: number;
+                                }[];
+                                devices: {
+                                    value: string;
+                                    count: number;
+                                }[];
+                            };
+                            assigneeLabel: string | null;
+                            resolvedByLabel: string | null;
+                            acknowledgedByLabel: string | null;
                             activities: {
                                 /** Format: uuid */
                                 id: string;
@@ -6203,6 +6950,19 @@ export interface operations {
                             resolvedAt: string | null;
                             /** Format: uuid */
                             resolvedById: string | null;
+                            /** Format: date-time */
+                            acknowledgedAt: string | null;
+                            /** Format: uuid */
+                            acknowledgedById: string | null;
+                            escalations: number;
+                            /** Format: date-time */
+                            lastEscalatedAt: string | null;
+                            /** Format: date-time */
+                            createdAt: string;
+                            /** Format: date-time */
+                            mutedUntil: string | null;
+                            /** Format: date-time */
+                            updatedAt: string;
                             version: number;
                             summary: {
                                 [key: string]: unknown;
@@ -6241,6 +7001,7 @@ export interface operations {
                             };
                             assigneeLabel: string | null;
                             resolvedByLabel: string | null;
+                            acknowledgedByLabel: string | null;
                             activities: {
                                 /** Format: uuid */
                                 id: string;
@@ -6314,6 +7075,658 @@ export interface operations {
             };
             /**
              * @description Not allowed
+             *
+             *     Not allowed
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    AlertMutesController_list: {
+        parameters: {
+            query?: {
+                appId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            items: {
+                                /** Format: uuid */
+                                id: string;
+                                /** Format: uuid */
+                                appId: string;
+                                appSlug: string;
+                                rule: string | null;
+                                reason: string;
+                                /** Format: date-time */
+                                until: string;
+                                /** Format: uuid */
+                                createdById: string;
+                                /** Format: date-time */
+                                createdAt: string;
+                                /** Format: date-time */
+                                endedAt: string | null;
+                                /** Format: uuid */
+                                endedById: string | null;
+                                active: boolean;
+                            }[];
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    AlertMutesController_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: uuid */
+                    appId: string;
+                    rule: string | null;
+                    minutes: number;
+                    reason: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            /** Format: uuid */
+                            appId: string;
+                            appSlug: string;
+                            rule: string | null;
+                            reason: string;
+                            /** Format: date-time */
+                            until: string;
+                            /** Format: uuid */
+                            createdById: string;
+                            /** Format: date-time */
+                            createdAt: string;
+                            /** Format: date-time */
+                            endedAt: string | null;
+                            /** Format: uuid */
+                            endedById: string | null;
+                            active: boolean;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description Not allowed
+             *
+             *     Not allowed
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    AlertMutesController_end: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** Format: uuid */
+                            id: string;
+                            /** Format: uuid */
+                            appId: string;
+                            appSlug: string;
+                            rule: string | null;
+                            reason: string;
+                            /** Format: date-time */
+                            until: string;
+                            /** Format: uuid */
+                            createdById: string;
+                            /** Format: date-time */
+                            createdAt: string;
+                            /** Format: date-time */
+                            endedAt: string | null;
+                            /** Format: uuid */
+                            endedById: string | null;
+                            active: boolean;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description Not allowed
+             *
+             *     Not allowed
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    DetectionController_listRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            items: {
+                                id: string;
+                                name: string;
+                                description: string;
+                                kind: string;
+                                /** @enum {string|null} */
+                                severity: "info" | "low" | "medium" | "high" | "critical" | null;
+                                grouping: string;
+                                window: string | null;
+                                autoResolves: boolean;
+                                params: {
+                                    name: string;
+                                    label: string;
+                                    unit: string;
+                                    default: number;
+                                    min: number;
+                                    max: number;
+                                }[];
+                                settings: {
+                                    enabled: boolean;
+                                    /** @enum {string|null} */
+                                    severity: "info" | "low" | "medium" | "high" | "critical" | null;
+                                    params: {
+                                        [key: string]: number;
+                                    };
+                                    /** Format: uuid */
+                                    updatedById: string | null;
+                                    /** Format: date-time */
+                                    updatedAt: string | null;
+                                };
+                            }[];
+                            maxNewAlertsPerHour: number;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    DetectionController_updateRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    enabled: boolean;
+                    /** @enum {string|null} */
+                    severity: "info" | "low" | "medium" | "high" | "critical" | null;
+                    /** @default {} */
+                    params?: {
+                        [key: string]: number;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            id: string;
+                            name: string;
+                            description: string;
+                            kind: string;
+                            /** @enum {string|null} */
+                            severity: "info" | "low" | "medium" | "high" | "critical" | null;
+                            grouping: string;
+                            window: string | null;
+                            autoResolves: boolean;
+                            params: {
+                                name: string;
+                                label: string;
+                                unit: string;
+                                default: number;
+                                min: number;
+                                max: number;
+                            }[];
+                            settings: {
+                                enabled: boolean;
+                                /** @enum {string|null} */
+                                severity: "info" | "low" | "medium" | "high" | "critical" | null;
+                                params: {
+                                    [key: string]: number;
+                                };
+                                /** Format: uuid */
+                                updatedById: string | null;
+                                /** Format: date-time */
+                                updatedAt: string | null;
+                            };
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description Not allowed
+             *
+             *     Not allowed
+             *
+             *     Not allowed
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    DetectionController_listPolicies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            items: {
+                                /** @enum {string} */
+                                severity: "info" | "low" | "medium" | "high" | "critical";
+                                enabled: boolean;
+                                firstAfterMinutes: number;
+                                repeatEveryMinutes: number;
+                                maxEscalations: number;
+                                channels: ("email" | "chat")[];
+                                /** Format: uuid */
+                                updatedById: string | null;
+                                /** Format: date-time */
+                                updatedAt: string;
+                            }[];
+                            available: {
+                                email: boolean;
+                                chat: string[];
+                            };
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    DetectionController_updatePolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                severity: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    enabled: boolean;
+                    firstAfterMinutes: number;
+                    repeatEveryMinutes: number;
+                    maxEscalations: number;
+                    channels: ("email" | "chat")[];
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            /** @enum {string} */
+                            severity: "info" | "low" | "medium" | "high" | "critical";
+                            enabled: boolean;
+                            firstAfterMinutes: number;
+                            repeatEveryMinutes: number;
+                            maxEscalations: number;
+                            channels: ("email" | "chat")[];
+                            /** Format: uuid */
+                            updatedById: string | null;
+                            /** Format: date-time */
+                            updatedAt: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description Not allowed
+             *
+             *     Not allowed
              *
              *     Not allowed
              */
@@ -7980,6 +9393,81 @@ export interface operations {
             };
         };
     };
+    SourcesController_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        data: {
+                            items: {
+                                /** Format: uuid */
+                                appId: string;
+                                slug: string;
+                                name: string;
+                                environment: string;
+                                /** @enum {string} */
+                                status: "never" | "disconnected" | "delayed" | "idle" | "active";
+                                heartbeatTimeoutSec: number;
+                                /** Format: date-time */
+                                lastHeartbeatAt: string | null;
+                                queueSize: number;
+                                queueOldestAgeSec: number | null;
+                                retrying: number;
+                                /** Format: date-time */
+                                lastEventAt: string | null;
+                                rejected15m: number;
+                                gaps: number;
+                                missingEvents: number;
+                                /** Format: date-time */
+                                oldestGapAt: string | null;
+                            }[];
+                            /** Format: date-time */
+                            checkedAt: string;
+                        };
+                        message: string;
+                    };
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     ConnectorController_activity: {
         parameters: {
             query?: {
@@ -8363,7 +9851,7 @@ export interface operations {
             content: {
                 "application/json": {
                     /** @enum {string} */
-                    route: "/" | "/sign-in" | "/forgot-password" | "/reset-password" | "/sign-up" | "/confirm-sign-up" | "/confirm-email-change" | "/revert-email-change" | "/accept-invitation" | "/account" | "/admin/users" | "/admin/invitations" | "/events" | "/events/:eventId" | "/apps/:appId/actors/:actorId" | "/apps/:appId/resources/:resourceType/:resourceId" | "/security" | "/alerts" | "/alerts/:alertId" | "/exports" | "/apps" | "/apps/new" | "/apps/:appId" | "/response-actions" | "/retention" | "/integrity" | "/admin/users/:userId" | "/*";
+                    route: "/" | "/sign-in" | "/forgot-password" | "/reset-password" | "/sign-up" | "/confirm-sign-up" | "/confirm-email-change" | "/revert-email-change" | "/accept-invitation" | "/account" | "/account/notifications" | "/admin/users" | "/admin/invitations" | "/events" | "/events/:eventId" | "/apps/:appId/actors/:actorId" | "/apps/:appId/resources/:resourceType/:resourceId" | "/security" | "/alerts" | "/alerts/:alertId" | "/soc" | "/detection-rules" | "/exports" | "/apps" | "/apps/new" | "/apps/:appId" | "/response-actions" | "/retention" | "/integrity" | "/admin/users/:userId" | "/*";
                     metrics: ({
                         /** @enum {string} */
                         name: "FCP" | "INP" | "LCP" | "TTFB";

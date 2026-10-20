@@ -7,6 +7,7 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { AlertsService, type RaiseAlert } from '../alerts/alerts.service.js';
+import { RuleSettingsService } from '../alerts/rule-settings.service.js';
 import type { Tag } from 'audit-contract';
 import { errorSummary } from '../common/logging/error-summary.js';
 import { SYSTEM_APP_ID } from '../connected-apps/connected-apps.service.js';
@@ -51,6 +52,15 @@ interface Found {
 /** What a run raised, per rule. */
 export type PeriodicSummary = Record<string, number>;
 
+/** The failed sign-in rules' thresholds for a pass (their settings over rules.constants.ts). */
+interface FailureThresholds {
+  account: number;
+  ip: number;
+  stuffing: number;
+  multiAppApps: number;
+  multiAppFailures: number;
+}
+
 // The rules over a window of events (docs/security.md#detection-rules), every
 // 5 minutes on the last 15: brute force against an account or from an IP,
 // credential stuffing, bulk exports, deletions and reads, one session used by
@@ -69,6 +79,7 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
     private readonly alerts: AlertsService,
     private readonly jobs: JobRunsService,
     @Inject(RULES_KEY) private readonly key: Buffer,
+    private readonly settings: RuleSettingsService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -109,12 +120,32 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
         const raise = async (found: Found[], alert: (group: Found) => RaiseAlert) => {
           for (const group of found) {
             const input = alert(group);
-            await this.alerts.raise(tx, input);
-            summary[input.rule] = (summary[input.rule] ?? 0) + 1;
+            if ((await this.alerts.raise(tx, input)) !== null) {
+              summary[input.rule] = (summary[input.rule] ?? 0) + 1;
+            }
           }
         };
+        // Each rule's settings for this pass: a rule turned off is not even queried.
+        const settings = await this.settings.snapshot();
+        const on = (rule: string) => settings.of(rule).enabled;
+        const param = (rule: string, name: string, fallback: number) =>
+          settings.of(rule).params[name] ?? fallback;
+        const thresholds: FailureThresholds = {
+          account: param('brute_force_account', 'failures', BRUTE_FORCE_ACCOUNT),
+          ip: param('brute_force_ip', 'failures', BRUTE_FORCE_IP),
+          stuffing: param('credential_stuffing', 'accounts', STUFFING_ACCOUNTS),
+          multiAppApps: param('multi_app_attack', 'applications', MULTI_APP_APPS),
+          multiAppFailures: param('multi_app_attack', 'failures', MULTI_APP_FAILURES),
+        };
 
-        const failures = await this.failures(tx, from, horizon, since);
+        const failures = [
+          'brute_force_account',
+          'brute_force_ip',
+          'credential_stuffing',
+          'multi_app_attack',
+        ].some(on)
+          ? await this.failures(tx, from, horizon, since, thresholds)
+          : { byAccount: [], byIp: [], stuffing: [], multiApp: [] };
         await raise(failures.byAccount, (group) => ({
           appId: group.appId,
           rule: 'brute_force_account',
@@ -176,7 +207,15 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
           ['data.bulk_delete', MASS_DELETE, 'mass_delete', 'high', 'bulk deletions'],
           ['data.read_other_user', MASS_READ, 'mass_read', 'medium', "reads of other users' data"],
         ] as const) {
-          const found = await this.byActor(tx, tag, threshold, from, horizon, since);
+          if (!on(rule)) continue;
+          const found = await this.byActor(
+            tx,
+            tag,
+            param(rule, 'count', threshold),
+            from,
+            horizon,
+            since,
+          );
           await raise(found, (group) => ({
             appId: group.appId,
             rule,
@@ -190,7 +229,14 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
           }));
         }
 
-        const reused = await this.tokenReuse(tx, horizon, since);
+        const reused = on('token_reuse')
+          ? await this.tokenReuse(
+              tx,
+              horizon,
+              since,
+              param('token_reuse', 'accounts', TOKEN_REUSE_ACCOUNTS),
+            )
+          : [];
         await raise(reused, (group) => ({
           appId: group.appId,
           rule: 'token_reuse',
@@ -221,7 +267,13 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
   }
 
   /** Failed sign-ins in the window, grouped by account, by IP, and by IP across applications. */
-  private async failures(tx: Tx, from: Date, horizon: Date, since: Date) {
+  private async failures(
+    tx: Tx,
+    from: Date,
+    horizon: Date,
+    since: Date,
+    limits: FailureThresholds,
+  ) {
     // A failed sign-in: an action tagged auth.sign_in_failed, or auth.sign_in
     // with any outcome but success. The account is the actor, its email's
     // pseudonym, or the user it was about.
@@ -254,14 +306,14 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
              (array_agg("id" ORDER BY "recorded_at"))[1:100]::text[] AS "eventPks", max("recorded_at") AS "last"
       FROM f WHERE "account" IS NOT NULL
       GROUP BY "app_id", "account"
-      HAVING count(*) >= ${BRUTE_FORCE_ACCOUNT} AND max("recorded_at") >= ${since}`);
+      HAVING count(*) >= ${limits.account} AND max("recorded_at") >= ${since}`);
     const perIp = await base(Prisma.sql`
       SELECT "app_id" AS "appId", "ip" AS "key", count(*)::int AS "count",
              count(DISTINCT "account")::int AS "distinct", 1 AS "apps",
              (array_agg("id" ORDER BY "recorded_at"))[1:100]::text[] AS "eventPks", max("recorded_at") AS "last"
       FROM f WHERE "ip" IS NOT NULL
       GROUP BY "app_id", "ip"
-      HAVING (count(*) >= ${BRUTE_FORCE_IP} OR count(DISTINCT "account") >= ${STUFFING_ACCOUNTS})
+      HAVING (count(*) >= ${limits.ip} OR count(DISTINCT "account") >= ${limits.stuffing})
          AND max("recorded_at") >= ${since}`);
     // Across applications: only between those with correlation on.
     const crossApp = await base(Prisma.sql`
@@ -274,7 +326,7 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
         GROUP BY f."ip", f."app_id"
       ), ips AS (
         SELECT "ip" FROM per_app GROUP BY "ip"
-        HAVING count(*) >= ${MULTI_APP_APPS} AND sum("count") >= ${MULTI_APP_FAILURES}
+        HAVING count(*) >= ${limits.multiAppApps} AND sum("count") >= ${limits.multiAppFailures}
            AND max("last") >= ${since}
       )
       SELECT per_app."app_id" AS "appId", per_app."ip" AS "key", per_app."count", 0 AS "distinct",
@@ -283,8 +335,8 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
       FROM per_app JOIN ips ON ips."ip" = per_app."ip"`);
     return {
       byAccount,
-      byIp: perIp.filter((group) => group.count >= BRUTE_FORCE_IP),
-      stuffing: perIp.filter((group) => group.distinct >= STUFFING_ACCOUNTS),
+      byIp: perIp.filter((group) => group.count >= limits.ip),
+      stuffing: perIp.filter((group) => group.distinct >= limits.stuffing),
       multiApp: crossApp,
     };
   }
@@ -306,7 +358,7 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
   }
 
   /** One session reference used by several accounts within the last hour. */
-  private tokenReuse(tx: Tx, horizon: Date, since: Date) {
+  private tokenReuse(tx: Tx, horizon: Date, since: Date, accounts: number) {
     const from = new Date(horizon.getTime() - TOKEN_REUSE_WINDOW_MS);
     return tx.$queryRaw<Found[]>`
       SELECT e."app_id" AS "appId", e."session_ref" AS "key", count(*)::int AS "count",
@@ -317,7 +369,7 @@ export class PeriodicRulesService implements OnApplicationBootstrap, OnModuleDes
       WHERE e."recorded_at" >= ${from} AND e."recorded_at" < ${horizon}
         AND e."session_ref" IS NOT NULL AND e."actor_id" IS NOT NULL
       GROUP BY e."app_id", e."session_ref"
-      HAVING count(DISTINCT e."actor_id") >= ${TOKEN_REUSE_ACCOUNTS} AND max(e."recorded_at") >= ${since}`;
+      HAVING count(DISTINCT e."actor_id") >= ${accounts} AND max(e."recorded_at") >= ${since}`;
   }
 }
 

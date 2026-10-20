@@ -2,19 +2,21 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { forgetVisibleApps } from '../../audit/apps';
-import { formatDateTime } from '../../audit/format';
+import { formatDateTime, toLocalInput } from '../../audit/format';
+import { resetLiveForTests, startLive } from '../../audit/live/stream';
 import type { Alert, AlertPage, VisibleApps } from '../../audit/types';
 import type { AuthUser } from '../../auth';
 import { resetForTests, setSession } from '../../auth/session';
-import { alertDetail } from '../../test/alerts';
+import { alertDetail, alertRow, liveFeed } from '../../test/alerts';
 import { eventSummary } from '../../test/events';
 import { admin } from '../../test/fixtures';
 import { failure, ok, stubFetch } from '../../test/http';
 import { renderRoute } from '../../test/render';
 
-// The alerts list: its filters live in the URL, it pages by offset, and each
-// row links to the alert and to the user it is about, named, with the
-// alert's whole detail in a drawer.
+// The alert center: its filters, search and order live in the URL, it pages
+// by offset, it reloads quietly when the live stream hears a change, and each
+// row links to the alert and to the user it is about, named, says whether it
+// was escalated or is silenced, with the alert's whole detail in a drawer.
 
 const LIST = 'GET /api/alerts';
 const DETAIL = 'GET /api/alerts/0190b6a1-0000-7000-8000-0000000000b1';
@@ -76,6 +78,13 @@ const alert = (overrides: Partial<Alert> = {}): Alert => ({
   assigneeId: null,
   resolvedAt: null,
   resolvedById: null,
+  acknowledgedAt: null,
+  acknowledgedById: null,
+  escalations: 0,
+  lastEscalatedAt: null,
+  mutedUntil: null,
+  createdAt: '2026-10-14T08:00:00.000Z',
+  updatedAt: '2026-10-15T09:30:00.000Z',
   version: 1,
   ...overrides,
 });
@@ -95,6 +104,7 @@ beforeEach(() => {
   setSession({ accessToken: 'admin-token', expiresIn: 900, user: admin });
 });
 afterEach(() => {
+  resetLiveForTests();
   resetForTests();
 });
 
@@ -320,6 +330,98 @@ describe('AlertsPage', () => {
       limit: '25',
       offset: '0',
     });
+  });
+
+  it('searches, bounds the time, picks silenced ones and sorts, all in the URL', async () => {
+    const { calls } = stub(() => ok(page([alert()])));
+    const router = renderRoute('/alerts');
+    const user = userEvent.setup();
+
+    await screen.findByRole('link', { name: 'Many failed sign-ins' });
+    await user.type(screen.getByLabelText('Search'), 'user-42');
+    await user.selectOptions(screen.getByLabelText('Status'), 'Unresolved');
+    await user.type(
+      screen.getByLabelText('Last seen from'),
+      toLocalInput('2026-10-14T08:00:00.000Z'),
+    );
+    await user.selectOptions(screen.getByLabelText('Silenced'), 'Not silenced');
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'Severity');
+    await user.selectOptions(screen.getByLabelText('Order'), 'Oldest or least serious first');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+
+    await vi.waitFor(() => {
+      expect(listCalls(calls)).toHaveLength(2);
+    });
+    expect(Object.fromEntries(queryOf(listCalls(calls)[1]))).toEqual({
+      status: 'open,in_review',
+      q: 'user-42',
+      from: '2026-10-14T08:00:00.000Z',
+      muted: 'false',
+      sort: 'severity',
+      order: 'asc',
+      limit: '25',
+      offset: '0',
+    });
+    expect(new URLSearchParams(router.state.location.search).get('q')).toBe('user-42');
+    // The defaults stay out of the URL.
+    await user.selectOptions(screen.getByLabelText('Sort by'), 'Last seen');
+    await user.selectOptions(screen.getByLabelText('Order'), 'Newest or most serious first');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await vi.waitFor(() => {
+      expect(router.state.location.search).not.toMatch(/sort|order/);
+    });
+  });
+
+  it('says which alerts were escalated unacknowledged and which a silence covers', async () => {
+    stub(() =>
+      ok(
+        page([
+          alert({ escalations: 2 }),
+          alert({
+            id: '0190b6a1-0000-7000-8000-0000000000b2',
+            title: 'A new country',
+            mutedUntil: new Date(Date.now() + 3_600_000).toISOString(),
+          }),
+          alert({
+            id: '0190b6a1-0000-7000-8000-0000000000b3',
+            title: 'Silence over',
+            mutedUntil: new Date(Date.now() - 60_000).toISOString(),
+          }),
+        ]),
+      ),
+    );
+    renderRoute('/alerts');
+
+    const escalated = await screen.findByRole('row', { name: /Many failed sign-ins/ });
+    expect(within(escalated).getByText('Escalated × 2')).toBeInTheDocument();
+    const silenced = screen.getByRole('row', { name: /A new country/ });
+    expect(within(silenced).getByText('Silenced')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('row', { name: /Silence over/ })).queryByText('Silenced'),
+    ).toBeNull();
+  });
+
+  it('reloads quietly when the live stream hears a change: what is shown stays meanwhile', async () => {
+    const feed = liveFeed();
+    const { calls } = stubFetch({
+      [APPS]: () => ok(visible),
+      [LIST]: () => ok(page([alert()])),
+      'GET /api/alerts/stream': () => feed.response(),
+    });
+    renderRoute('/alerts');
+    await screen.findByRole('link', { name: 'Many failed sign-ins' });
+    startLive();
+    feed.send('ready', {});
+    const changed = alertRow({ status: 'in_review' });
+    feed.send('alert', { alert: changed, replay: false }, `${changed.updatedAt}|${changed.id}`);
+
+    await vi.waitFor(
+      () => {
+        expect(listCalls(calls)).toHaveLength(2);
+      },
+      { timeout: 3000 },
+    );
+    expect(screen.getByRole('link', { name: 'Many failed sign-ins' })).toBeInTheDocument();
   });
 
   it('pages through the alerts, keeping the filters', async () => {

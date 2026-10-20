@@ -152,6 +152,28 @@ export const routes = createRoutesFromElements(
               }))
             }
           />
+          <Route
+            path="soc"
+            lazy={() =>
+              import('./pages/audit/SocPage').then(({ SocPage }) => ({ Component: SocPage }))
+            }
+          />
+          <Route
+            path="detection-rules"
+            lazy={() =>
+              import('./pages/audit/DetectionRulesPage').then(({ DetectionRulesPage }) => ({
+                Component: DetectionRulesPage,
+              }))
+            }
+          />
+          <Route
+            path="account/notifications"
+            lazy={() =>
+              import('./pages/audit/NotificationSettingsPage').then(
+                ({ NotificationSettingsPage }) => ({ Component: NotificationSettingsPage }),
+              )
+            }
+          />
         </Route>
         <Route element={<RequireRole role={EXPORTERS} />}>
           <Route

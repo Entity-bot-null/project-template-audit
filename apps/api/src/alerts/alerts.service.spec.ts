@@ -6,13 +6,16 @@ import type { ExplorerService } from '../explorer/explorer.service.js';
 import type { MailOutboxService } from '../infrastructure/mail/mail-outbox.service.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
 import type { WebhookOutboxService } from '../webhooks/webhook-outbox.service.js';
+import type { ActiveMute, AlertMutesService } from './alert-mutes.service.js';
 import { AlertsService, type RaiseAlert } from './alerts.service.js';
+import { ruleSettings } from './rule-settings.testing.js';
 
 const APP = '0199e0b1-0000-7000-8000-000000000001';
 const ALERT = '0199e0b1-0000-7000-8000-0000000000a1';
 const AUDITOR = { id: '0199e0b1-0000-7000-8000-00000000000b', role: 'auditor' as const };
 const AT = new Date('2026-10-15T12:00:00.000Z');
 const STAFF = '0199e0b1-0000-7000-8000-0000000000c1';
+const PAGE = { limit: 20, offset: 0, sort: 'last_seen', order: 'desc' } as const;
 
 /** An event behind an alert, as its detail selects it (EVIDENCE_SELECT). */
 const eventRow = (id: string, overrides: Record<string, unknown> = {}) => ({
@@ -66,13 +69,19 @@ const alertRow = (overrides: Record<string, unknown> = {}) => ({
   assigneeId: null,
   resolvedAt: null,
   resolvedById: null,
+  acknowledgedAt: null as Date | null,
+  acknowledgedById: null as string | null,
+  escalations: 0,
+  lastEscalatedAt: null as Date | null,
+  createdAt: AT,
+  updatedAt: AT,
   version: 0,
   activities: [],
   events: [] as { eventPk: string }[],
   ...overrides,
 });
 
-function setup() {
+function setup(settings = ruleSettings()) {
   const tx = {
     $queryRaw: vi.fn(() => Promise.resolve([{ id: ALERT, created: true }] as unknown[])),
     $executeRaw: vi.fn(() => Promise.resolve(1)),
@@ -90,19 +99,28 @@ function setup() {
         Promise.resolve([{ id: 'admin-1', email: 'admin@example.com' }] as unknown[]),
       ),
     },
-    alert: { updateMany: vi.fn((..._args: unknown[]) => Promise.resolve({ count: 1 })) },
+    alert: {
+      updateMany: vi.fn((..._args: unknown[]) => Promise.resolve({ count: 1 })),
+      findFirst: vi.fn((..._args: unknown[]) => Promise.resolve(null as unknown)),
+      update: vi.fn((..._args: unknown[]) => Promise.resolve({})),
+    },
   };
   const prisma = {
-    $transaction: vi.fn((work: (client: typeof tx) => Promise<unknown>) => work(tx)),
+    $transaction: vi.fn((work: ((client: typeof tx) => Promise<unknown>) | Promise<unknown>[]) =>
+      Array.isArray(work) ? Promise.all(work) : work(tx),
+    ),
+    alertMute: { findMany: vi.fn((_args: unknown) => Promise.resolve([] as unknown[])) },
     $queryRaw: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
     auditEvent: { findMany: vi.fn((_args: unknown) => Promise.resolve([] as unknown[])) },
     alert: {
       findMany: vi.fn(() => Promise.resolve([alertRow()] as unknown[])),
       count: vi.fn(() => Promise.resolve(1)),
       findUnique: vi.fn(() => Promise.resolve(alertRow() as unknown)),
-      groupBy: vi.fn(() =>
+      groupBy: vi.fn((..._args: unknown[]) =>
         Promise.resolve([{ severity: 'high', _count: { _all: 2 } }] as unknown[]),
       ),
+      findFirst: vi.fn((..._args: unknown[]) => Promise.resolve(null as unknown)),
+      update: vi.fn((..._args: unknown[]) => Promise.resolve({})),
     },
     alertActivity: { create: vi.fn(() => Promise.resolve({})) },
     user: {
@@ -144,14 +162,19 @@ function setup() {
       ),
     ),
   };
+  const mutes = {
+    active: vi.fn((..._args: unknown[]) => Promise.resolve([] as ActiveMute[])),
+  };
   const service = new AlertsService(
     prisma as unknown as PrismaService,
     access as unknown as AppAccessService,
     webhooks as unknown as WebhookOutboxService,
     mail as unknown as MailOutboxService,
     explorer as unknown as ExplorerService,
+    settings,
+    mutes as unknown as AlertMutesService,
   );
-  return { tx, prisma, access, webhooks, mail, explorer, service };
+  return { tx, prisma, access, webhooks, mail, explorer, mutes, service };
 }
 
 const raise = (overrides: Partial<RaiseAlert> = {}): RaiseAlert => ({
@@ -227,7 +250,10 @@ describe('AlertsService', () => {
 
     it('adds an occurrence to the open alert of its group, notifying nobody again', async () => {
       const { tx, webhooks, mail, service } = setup();
-      tx.$queryRaw.mockResolvedValueOnce([{ id: ALERT, created: false }]);
+      // Its group is open (no flood check), then the statement adds an occurrence.
+      tx.$queryRaw
+        .mockResolvedValueOnce([{ id: ALERT }])
+        .mockResolvedValueOnce([{ id: ALERT, created: false }]);
       await service.raise(tx as never, raise({ eventPks: [] }));
       expect(tx.$executeRaw).not.toHaveBeenCalled();
       expect(tx.alertActivity.create).not.toHaveBeenCalled();
@@ -268,7 +294,7 @@ describe('AlertsService', () => {
 
     it('fails loudly if the statement answered nothing', async () => {
       const { tx, service } = setup();
-      tx.$queryRaw.mockResolvedValueOnce([]);
+      tx.$queryRaw.mockResolvedValueOnce([{ id: ALERT }]).mockResolvedValueOnce([]);
       await expect(service.raise(tx as never, raise())).rejects.toThrow(
         /neither created nor updated/,
       );
@@ -286,6 +312,8 @@ describe('AlertsService', () => {
         assigneeId: AUDITOR.id,
         limit: 20,
         offset: 0,
+        sort: 'last_seen',
+        order: 'desc',
       });
       expect(page).toMatchObject({
         total: 1,
@@ -299,11 +327,12 @@ describe('AlertsService', () => {
             severity: { in: ['high'] },
             rule: 'brute_force_account',
             assigneeId: AUDITOR.id,
+            AND: [],
           },
         }),
       );
       access.canSee.mockResolvedValueOnce(false);
-      await expect(service.list(AUDITOR, { appId: APP, limit: 20, offset: 0 })).resolves.toEqual({
+      await expect(service.list(AUDITOR, { appId: APP, ...PAGE })).resolves.toEqual({
         items: [],
         total: 0,
       });
@@ -318,7 +347,7 @@ describe('AlertsService', () => {
       ]);
       prisma.$queryRaw.mockResolvedValueOnce([{ alertId: ALERT, label: 'Ada Lovelace' }]);
       prisma.user.findMany.mockResolvedValueOnce([{ id: STAFF, name: 'Grace Hopper' }]);
-      const page = await service.list(AUDITOR, { limit: 20, offset: 0 });
+      const page = await service.list(AUDITOR, PAGE);
       expect(page.items.map((item) => item.subjectLabel)).toEqual([
         'Ada Lovelace',
         null,
@@ -329,7 +358,7 @@ describe('AlertsService', () => {
       expect(prisma.$queryRaw.mock.calls[0]).toContainEqual([ALERT]);
 
       prisma.alert.findMany.mockResolvedValueOnce([alertRow({ subject: null })]);
-      await service.list(AUDITOR, { limit: 20, offset: 0 });
+      await service.list(AUDITOR, PAGE);
       expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
     });
 
@@ -564,5 +593,281 @@ describe('AlertsService', () => {
     service.onModuleDestroy();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(prisma.alert.groupBy).toHaveBeenCalledTimes(2);
+  });
+
+  describe('rules, floods and silences', () => {
+    /** The values a tagged $queryRaw call was given (its interpolations). */
+    const valuesOf = (call: unknown[] | undefined) => (call ?? []).slice(1);
+
+    it('raises nothing for a rule an administrator turned off', async () => {
+      const { tx, service } = setup(ruleSettings({ brute_force_account: { enabled: false } }));
+      await expect(service.raise(tx as never, raise())).resolves.toBeNull();
+      expect(tx.$queryRaw).not.toHaveBeenCalled();
+      expect(tx.alertActivity.create).not.toHaveBeenCalled();
+    });
+
+    it("raises with the administrator's severity in place of the rule's", async () => {
+      const { tx, service } = setup(
+        ruleSettings({ brute_force_account: { severity: 'critical' } }),
+      );
+      tx.$queryRaw.mockResolvedValueOnce([{ id: ALERT }]); // its group is open
+      await service.raise(tx as never, raise({ severity: 'high' }));
+      expect(valuesOf(tx.$queryRaw.mock.calls[1])).toContain('critical');
+    });
+
+    it("folds a rule's new groups into one alert past its hourly cap, never past it otherwise", async () => {
+      const capped = setup();
+      capped.tx.$queryRaw
+        .mockResolvedValueOnce([]) // a new group
+        .mockResolvedValueOnce([{ count: 20 }]) // 20 new alerts of the rule this hour
+        .mockResolvedValueOnce([{ id: ALERT, created: true }]);
+      await capped.service.raise(
+        capped.tx as never,
+        raise({ groupKey: 'brute_force_account:x:user-77' }),
+      );
+      const insert = valuesOf(capped.tx.$queryRaw.mock.calls[2]);
+      expect(insert).toContain(`brute_force_account:${APP}:flood`);
+      expect(insert).not.toContain('user-9'); // no subject: it is about many
+      expect(
+        insert.find((value) => typeof value === 'string' && value.startsWith('More than 20')),
+      ).toBeDefined();
+
+      const under = setup();
+      under.tx.$queryRaw
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ count: 19 }])
+        .mockResolvedValueOnce([{ id: ALERT, created: true }]);
+      await under.service.raise(
+        under.tx as never,
+        raise({ groupKey: 'brute_force_account:x:user-77' }),
+      );
+      expect(valuesOf(under.tx.$queryRaw.mock.calls[2])).toContain('brute_force_account:x:user-77');
+    });
+
+    it("keeps a silenced alert's people quiet, never its application's webhook", async () => {
+      const { tx, webhooks, mail, mutes, service } = setup();
+      webhooks.chatTargets = ['slack'];
+      const until = new Date(AT.getTime() + 3_600_000);
+      mutes.active.mockResolvedValueOnce([{ id: 'm1', appId: APP, rule: null, until }]);
+      await service.raise(tx as never, raise({ severity: 'critical' }));
+      expect(webhooks.toApp).toHaveBeenCalled();
+      expect(webhooks.toChat).not.toHaveBeenCalled();
+      expect(mail.enqueue).not.toHaveBeenCalled();
+      const notified = tx.alertActivity.create.mock.calls.find(
+        ([args]) => args.data.kind === 'notified',
+      );
+      expect(notified?.[0].data.note).toBe(
+        `webhook, silenced until ${until.toISOString()}: no email or chat`,
+      );
+    });
+  });
+
+  describe('acknowledgement and closing', () => {
+    it('acknowledges an open alert: In review, its assignee, its history', async () => {
+      const { tx, service } = setup();
+      await service.acknowledge(AUDITOR, ALERT, 0);
+      const data = tx.alert.updateMany.mock.calls[0]?.[0] as {
+        where: unknown;
+        data: Record<string, unknown>;
+      };
+      expect(data.where).toEqual({ id: ALERT, version: 0 });
+      expect(data.data).toMatchObject({
+        status: 'in_review',
+        acknowledgedById: AUDITOR.id,
+        assigneeId: AUDITOR.id,
+      });
+      expect(data.data.acknowledgedAt).toBeInstanceOf(Date);
+      expect(tx.alertActivity.create.mock.calls.map(([args]) => args.data.kind)).toEqual([
+        'acknowledged',
+        'assigned',
+      ]);
+    });
+
+    it('refuses to acknowledge a closed alert, one already acknowledged, or a stale version', async () => {
+      const closed = setup();
+      closed.prisma.alert.findUnique.mockResolvedValueOnce(alertRow({ status: 'resolved' }));
+      await expect(closed.service.acknowledge(AUDITOR, ALERT, 0)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      const taken = setup();
+      taken.prisma.alert.findUnique.mockResolvedValueOnce(
+        alertRow({ status: 'in_review', acknowledgedAt: AT, acknowledgedById: STAFF }),
+      );
+      await expect(taken.service.acknowledge(AUDITOR, ALERT, 0)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      const stale = setup();
+      stale.tx.alert.updateMany.mockResolvedValueOnce({ count: 0 });
+      await expect(stale.service.acknowledge(AUDITOR, ALERT, 0)).rejects.toThrow(/changed since/);
+    });
+
+    it('keeps the reason a closing gives, and starts the escalation over on reopening', async () => {
+      const { tx, prisma, service } = setup();
+      await service.update(AUDITOR, ALERT, {
+        status: 'false_positive',
+        reason: 'The new phone was confirmed by the user.',
+        version: 0,
+      });
+      expect(tx.alertActivity.create.mock.calls[0]?.[0].data).toMatchObject({
+        kind: 'status_changed',
+        toStatus: 'false_positive',
+        note: 'The new phone was confirmed by the user.',
+      });
+
+      prisma.alert.findUnique.mockResolvedValueOnce(
+        alertRow({
+          status: 'resolved',
+          acknowledgedAt: AT,
+          acknowledgedById: STAFF,
+          escalations: 2,
+        }),
+      );
+      await service.update(AUDITOR, ALERT, { status: 'open', version: 1 });
+      expect(tx.alert.updateMany.mock.calls[1]?.[0]).toMatchObject({
+        data: {
+          status: 'open',
+          acknowledgedAt: null,
+          acknowledgedById: null,
+          escalations: 0,
+          lastEscalatedAt: null,
+        },
+      });
+    });
+
+    it('takes an alert on when it moves to In review, once', async () => {
+      const { tx, prisma, service } = setup();
+      await service.update(AUDITOR, ALERT, { status: 'in_review', version: 0 });
+      expect(tx.alert.updateMany.mock.calls[0]?.[0]).toMatchObject({
+        data: { status: 'in_review', acknowledgedById: AUDITOR.id },
+      });
+      prisma.alert.findUnique.mockResolvedValueOnce(
+        alertRow({ status: 'open', acknowledgedAt: AT, acknowledgedById: STAFF }),
+      );
+      await service.update(AUDITOR, ALERT, { status: 'in_review', version: 1 });
+      expect(tx.alert.updateMany.mock.calls[1]?.[0]).not.toHaveProperty('data.acknowledgedById');
+    });
+
+    it('touches the alert with a note, so whoever has it open sees it', async () => {
+      const { prisma, service } = setup();
+      await service.addNote(AUDITOR, ALERT, 'Checked with the user.');
+      expect(prisma.alert.update).toHaveBeenCalledWith({
+        where: { id: ALERT },
+        data: { updatedAt: expect.any(Date) as unknown },
+      });
+    });
+  });
+
+  describe('counting, searching and conditions', () => {
+    it('counts the unresolved alerts by severity, the silenced ones and the oldest open', async () => {
+      const { prisma, mutes, service } = setup();
+      prisma.alert.groupBy.mockResolvedValueOnce([
+        { status: 'open', severity: 'critical', _count: { _all: 2 } },
+        { status: 'in_review', severity: 'high', _count: { _all: 1 } },
+      ]);
+      prisma.alert.findFirst.mockResolvedValueOnce({ createdAt: AT });
+      prisma.alertMute.findMany.mockResolvedValueOnce([{ appId: APP }]);
+      mutes.active.mockResolvedValueOnce([
+        { id: 'm1', appId: APP, rule: 'brute_force_ip', until: AT },
+      ]);
+      prisma.alert.count.mockResolvedValueOnce(3);
+      await expect(service.summary(AUDITOR)).resolves.toEqual({
+        open: { info: 0, low: 0, medium: 0, high: 0, critical: 2 },
+        inReview: { info: 0, low: 0, medium: 0, high: 1, critical: 0 },
+        muted: 3,
+        oldestOpenAt: AT.toISOString(),
+      });
+    });
+
+    it('answers nothing of an application the caller may not see', async () => {
+      const { access, prisma, service } = setup();
+      access.canSee.mockResolvedValueOnce(false);
+      const summary = await service.summary(AUDITOR, APP);
+      expect(summary.open.critical).toBe(0);
+      expect(prisma.alert.groupBy).not.toHaveBeenCalled();
+    });
+
+    it('searches by id, rule, title or subject, filters the silenced ones and orders as asked', async () => {
+      const { prisma, mutes, service } = setup();
+      mutes.active.mockResolvedValue([{ id: 'm1', appId: APP, rule: 'brute_force_ip', until: AT }]);
+      prisma.alertMute.findMany.mockResolvedValue([{ appId: APP }]);
+      await service.list(AUDITOR, {
+        ...PAGE,
+        q: ALERT,
+        muted: 'true',
+        sort: 'severity',
+        order: 'desc',
+      });
+      const call = prisma.alert.findMany.mock.calls[0] as unknown as [
+        { where: { AND: unknown[] }; orderBy: unknown },
+      ];
+      expect(call[0].where.AND).toEqual([
+        {
+          OR: [
+            { id: ALERT },
+            { rule: { startsWith: ALERT } },
+            { title: { contains: ALERT, mode: 'insensitive' } },
+            { subject: ALERT },
+          ],
+        },
+        { OR: [{ appId: APP, rule: 'brute_force_ip' }] },
+      ]);
+      expect(call[0].orderBy).toEqual([
+        { severity: 'desc' },
+        { lastSeenAt: 'desc' },
+        { id: 'desc' },
+      ]);
+      await service.list(AUDITOR, { ...PAGE, muted: 'false' });
+      const second = prisma.alert.findMany.mock.calls[1] as unknown as [
+        { where: { AND: unknown[] } },
+      ];
+      expect(second[0].where.AND).toEqual([
+        { NOT: { OR: [{ appId: APP, rule: 'brute_force_ip' }] } },
+      ]);
+    });
+
+    it('holds one alert per condition: raised once, refreshed every 10 minutes, then resolved by itself', async () => {
+      const { tx, service } = setup();
+      const condition = raise({
+        rule: 'source_silent',
+        groupKey: `source_silent:${APP}`,
+        eventPks: [],
+      });
+      await service.condition(tx as never, condition);
+      expect(tx.$queryRaw).toHaveBeenCalled(); // raised
+
+      const held = setup();
+      held.tx.alert.findFirst.mockResolvedValueOnce({
+        id: ALERT,
+        lastSeenAt: new Date(AT.getTime() - 60_000),
+      });
+      await held.service.condition(held.tx as never, condition);
+      expect(held.tx.alert.update).not.toHaveBeenCalled();
+      held.tx.alert.findFirst.mockResolvedValueOnce({
+        id: ALERT,
+        lastSeenAt: new Date(AT.getTime() - 600_000),
+      });
+      await held.service.condition(held.tx as never, condition);
+      expect(held.tx.alert.update).toHaveBeenCalledWith({
+        where: { id: ALERT },
+        data: { lastSeenAt: AT, summary: condition.summary },
+      });
+
+      await expect(
+        held.service.resolveCleared(held.tx as never, condition.groupKey, 'Back.'),
+      ).resolves.toBeNull();
+      held.tx.alert.findFirst.mockResolvedValueOnce({ id: ALERT, status: 'open' });
+      await expect(
+        held.service.resolveCleared(held.tx as never, condition.groupKey, 'Back.'),
+      ).resolves.toBe(ALERT);
+      expect(held.tx.alertActivity.create).toHaveBeenLastCalledWith({
+        data: {
+          alertId: ALERT,
+          kind: 'status_changed',
+          fromStatus: 'open',
+          toStatus: 'resolved',
+          note: 'Back.',
+        },
+      });
+    });
   });
 });
