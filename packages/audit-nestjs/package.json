@@ -1,6 +1,6 @@
 {
   "name": "audit-nestjs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Audit Hub connector for the API of a project created from project-template-web: a transactional outbox, the forwarder, client events, account activity, webhooks and security prompts. Installed as source (docs/adr/0009).",
   "type": "module",

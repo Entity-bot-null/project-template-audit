@@ -33,4 +33,11 @@ describe('well-formed strings', () => {
     expect(toWellFormed(`${LOW}${LOW}x`)).toBe('��x');
     expect(isWellFormed(toWellFormed(`${HIGH}x${LOW}`))).toBe(true);
   });
+
+  it('refuses what is not a string, whatever it looks like', () => {
+    for (const value of [['a', 'b'], { length: 1 }, 7, null]) {
+      expect(() => isWellFormed(value as unknown as string)).toThrow(TypeError);
+      expect(() => toWellFormed(value as unknown as string)).toThrow(TypeError);
+    }
+  });
 });

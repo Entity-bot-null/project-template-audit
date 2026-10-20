@@ -1,6 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, type Page, test } from '@playwright/test';
 
@@ -36,12 +35,15 @@ const PERIOD_MS = 30_000;
 // The API takes each 30-second step once per account (replays are refused),
 // and the step before and after the current one. Steps used are kept in a
 // file the run's worker processes share (one worker, restarted after a
-// failure): a retry never presents a code its failed attempt spent.
-const STEPS_FILE = join(tmpdir(), `audit-hub-e2e-totp-steps-${String(process.ppid)}.json`);
+// failure): a retry never presents a code its failed attempt spent. The file
+// is in the run's own output directory (test-results/), never under a
+// predictable name in the shared temporary folder.
+const stepsFile = () =>
+  join(test.info().project.outputDir, `.totp-steps-${String(process.ppid)}.json`);
 
 function usedSteps(): Record<string, number> {
   try {
-    return JSON.parse(readFileSync(STEPS_FILE, 'utf8')) as Record<string, number>;
+    return JSON.parse(readFileSync(stepsFile(), 'utf8')) as Record<string, number>;
   } catch {
     return {};
   }
@@ -91,7 +93,8 @@ export async function nextCode(secret: string): Promise<string> {
     now = Math.floor(Date.now() / PERIOD_MS);
   }
   const step = Math.max(now, last + 1);
-  writeFileSync(STEPS_FILE, JSON.stringify({ ...steps, [secret]: step }));
+  mkdirSync(test.info().project.outputDir, { recursive: true });
+  writeFileSync(stepsFile(), JSON.stringify({ ...steps, [secret]: step }));
   return totpAt(secret, step);
 }
 

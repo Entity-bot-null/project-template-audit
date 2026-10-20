@@ -1,5 +1,5 @@
 /** What the events say sent them (client.sdk); the package's version (connector.test.mjs checks it). */
-export const SDK = { name: 'audit-expo', version: '0.2.0' } as const;
+export const SDK = { name: 'audit-expo', version: '0.2.1' } as const;
 
 /** The queue's own SQLite file, apart from the app's key-value store. */
 export const QUEUE_DATABASE = 'audit-queue.db';

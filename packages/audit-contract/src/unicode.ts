@@ -6,8 +6,13 @@
 const isHigh = (code: number) => code >= 0xd800 && code <= 0xdbff;
 const isLow = (code: number) => code >= 0xdc00 && code <= 0xdfff;
 
-/** Index of the first lone surrogate, or -1. */
+/**
+ * Index of the first lone surrogate, or -1. A string only: in JavaScript
+ * anything may arrive (an array from a parsed request has a length and
+ * indexes too), and only a string is measured.
+ */
 function firstLoneSurrogate(text: string, from = 0): number {
+  if (typeof text !== 'string') throw new TypeError('Expected a string');
   for (let index = from; index < text.length; index += 1) {
     const code = text.charCodeAt(index);
     if (isHigh(code)) {

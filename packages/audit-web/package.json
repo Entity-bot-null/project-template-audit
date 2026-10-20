@@ -1,6 +1,6 @@
 {
   "name": "audit-web",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Audit Hub connector for the web app of a project created from project-template-web: the page's own events (a CSP violation, a refused return path, an expired session), queued in memory per user and sent through the app's API from a lazy chunk. Installed as source (docs/adr/0009).",
   "type": "module",

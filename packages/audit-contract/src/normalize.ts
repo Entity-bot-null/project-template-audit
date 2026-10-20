@@ -289,26 +289,30 @@ function normalizeObject(
     context.dropped.push(path);
     return undefined;
   }
-  const result: JsonRecord = {};
+  // The schema's own fields only: a key such as "constructor" or "__proto__"
+  // names something every object inherits, never a field. What is kept is
+  // built from entries, never written under a name the input chose.
+  const fields = schema.shape as Record<string, z.ZodType>;
+  const kept: [string, unknown][] = [];
   for (const [key, item] of Object.entries(value)) {
     const fieldPath = `${path}.${key}`;
-    const field = schema.shape[key] as z.ZodType | undefined;
+    const field = Object.hasOwn(fields, key) ? fields[key] : undefined;
     if (field === undefined) {
       context.dropped.push(fieldPath);
       continue;
     }
     let candidate = item;
-    const limit = textLimits[key];
+    const limit = Object.hasOwn(textLimits, key) ? textLimits[key] : undefined;
     if (typeof candidate === 'string' && limit !== undefined) {
       const text = sanitizeText(candidate, limit);
       if (text.truncated) context.truncated.push(fieldPath);
       candidate = text.value;
     }
     const parsed = field.safeParse(candidate);
-    if (parsed.success) result[key] = parsed.data;
+    if (parsed.success) kept.push([key, parsed.data]);
     else context.dropped.push(fieldPath);
   }
-  const whole = schema.safeParse(result);
+  const whole = schema.safeParse(Object.fromEntries(kept));
   if (!whole.success) {
     context.dropped.push(path);
     return undefined;
