@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Single-page app: React, React Router, typed API client generated from the OpenAPI contract.",
   "type": "module",
