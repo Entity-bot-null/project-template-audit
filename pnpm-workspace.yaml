@@ -23,6 +23,9 @@ engineStrict: true
 # minimumReleaseAgeExcludePrune drops an entry once an update moves the
 # lockfile past its version.
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - 'body-parser@2.4.0' # expires 2026-10-29: GHSA-27r3-jxmh-p828
+  - 'multer@2.5.0' # expires 2026-10-29: GHSA-q7qp-rjg7-q26m
 minimumReleaseAgeExcludePrune: true
 
 # Supply chain: a new version published with weaker evidence than its earlier
@@ -61,6 +64,9 @@ overrides:
   # GHSA-3f6p-5ww8-9rcr (high) and GHSA-rgwj-5xj2-c3m3 (moderate), pinned at
   # 3.15.3 by the prisma CLI 7.10 (MySQL support; this template uses PostgreSQL).
   'prisma>mysql2': ^3.24.5
+  # GHSA-q7qp-rjg7-q26m (high), pinned at 2.4.0 by @nestjs/platform-express
+  # 12.1-12.2; 12.3 ships 2.5.0 but is days old (update NestJS, then delete this).
+  '@nestjs/platform-express>multer': 2.5.0
 
 # Reviewed peer exceptions: each entry says why the mismatch is safe.
 peerDependencyRules:
