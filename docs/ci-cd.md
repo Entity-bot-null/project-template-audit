@@ -19,6 +19,9 @@ push / pull request
   └─ Conventions (conventions.yml)   branch name, PR title (Conventional Commits),
                                      again when the title is edited  ← required check
   └─ CodeQL (codeql.yml)       cross-file SAST                                    opt-in, advisory
+  └─ Cerberus (cerberus.yml)   security sweep of the change: stack rules, routes     advisory
+                               without authentication, learned rules (engine in the
+                               private Entity-bot-null/cerberus, secret CERBERUS_SSH_KEY)
   └─ Examples (examples.yml)   the connected example (docs/adr/0010): its gates,  when the connector, the
                                its integration suite, the connector unedited      contract or examples/ change
 merge to main (squash)
