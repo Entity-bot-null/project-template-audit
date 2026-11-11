@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/Entity-bot-null/project-template-audit/compare/v0.3.0...v0.3.1) (2026-10-28)
+
+
+### Bug fixes
+
+* **deps:** move body-parser, multer and undici past high advisories ([#27](https://github.com/Entity-bot-null/project-template-audit/issues/27)) ([775d8c8](https://github.com/Entity-bot-null/project-template-audit/commit/775d8c8f95b150cd4f9b70ad9eb47c8fd6135b09))
+
 ## [0.3.0](https://github.com/Entity-bot-null/project-template-audit/compare/v0.2.1...v0.3.0) (2026-10-20)
 
 
